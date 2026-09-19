@@ -1,4 +1,4 @@
-import type { Category, DayNote, Occurrence, SyncRequest, SyncResponse, Task, UserSettings } from '@dnevnik/shared';
+import type { Category, DayNote, Occurrence, SyncRequest, SyncResponse, Task, UserSettings, VoiceNote } from '@dnevnik/shared';
 import { api } from './api.ts';
 import { db, getMeta, setMeta, type OutboxEntry, type SettingsMeta } from './db.ts';
 
@@ -47,6 +47,7 @@ async function doSync(localSettings: SettingsMeta): Promise<SyncResult> {
     occurrences: await pick<Occurrence>('occurrences', db.occurrences),
     categories: await pick<Category>('categories', db.categories),
     notes: await pick<DayNote>('notes', db.notes),
+    voiceNotes: await pick<VoiceNote>('voiceNotes', db.voiceNotes),
     settings: localSettings.dirty ? localSettings.settings : undefined,
   };
 
@@ -74,11 +75,31 @@ async function doSync(localSettings: SettingsMeta): Promise<SyncResult> {
     }
   };
 
-  await db.transaction('rw', db.tasks, db.occurrences, db.categories, db.notes, async () => {
+  // Voice notes: `uploadedAt` is server-owned and only ever grows, so it is merged on its own
+  // instead of riding the last-write-wins comparison (a client tombstone must not lose it and vice versa).
+  const mergeVoice = async (incoming: VoiceNote[]) => {
+    for (const item of incoming) {
+      const local = await db.voiceNotes.get(item.id);
+      if (!local) {
+        await db.voiceNotes.put(item);
+        changed++;
+        continue;
+      }
+      const base = item.updatedAt > local.updatedAt ? item : local;
+      const uploadedAt = item.uploadedAt ?? base.uploadedAt ?? null;
+      if (base !== local || uploadedAt !== local.uploadedAt) {
+        await db.voiceNotes.put({ ...base, uploadedAt });
+        changed++;
+      }
+    }
+  };
+
+  await db.transaction('rw', db.tasks, db.occurrences, db.categories, db.notes, db.voiceNotes, async () => {
     await merge(db.tasks, res.tasks);
     await merge(db.occurrences, res.occurrences);
     await merge(db.categories, res.categories);
     await merge(db.notes, res.notes);
+    await mergeVoice(res.voiceNotes ?? []);
   });
 
   await setMeta('lastSync', res.now);

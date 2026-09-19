@@ -1,10 +1,11 @@
 import { Bot, InlineKeyboard, type CommandContext, type Context } from 'grammy';
-import type { Lang, TaskInstance, UserSettings } from '@dnevnik/shared';
+import type { Lang, NoteSection, TaskInstance, UserSettings } from '@dnevnik/shared';
 import { formatDuration, instancesForDate, minutesToHHMM, nowInTz, quickParse } from '@dnevnik/shared';
 import { and, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Env } from './env.ts';
 import { ensureUser, getDb } from './sync.ts';
-import { categories, occurrenceFromRow, occurrences, settingsFromRow, taskFromRow, tasks } from './db/schema.ts';
+import { importVoice } from './voice.ts';
+import { categories, occurrenceFromRow, occurrences, settingsFromRow, taskFromRow, tasks, voiceNotes } from './db/schema.ts';
 
 export const T = {
   ru: {
@@ -25,8 +26,18 @@ export const T = {
     reportAllDone: 'Все задачи закрыты. Отличный день.',
     reminder: (t: string, inMin: number, at: string) =>
       inMin <= 0 ? `Сейчас: <b>${t}</b> (${at})` : `Через ${inMin} мин: <b>${t}</b> (${at})`,
-    help: 'Команды:\n/today — задачи на сегодня\n/tomorrow — задачи на завтра\n/app — открыть приложение\n\nЛюбой другой текст превращается в задачу.',
+    help: 'Команды:\n/today — задачи на сегодня\n/tomorrow — задачи на завтра\n/app — открыть приложение\n\nЛюбой другой текст превращается в задачу.\nГолосовое сообщение сохраняется в заметки дня (утро до 15:00, потом вечер; подпись «утро», «вечер» или «вчера» уточняет).',
     privateOnly: 'Ежедневник работает в личном чате с ботом.',
+    voiceSaving: 'Сохраняю голосовое…',
+    voiceSaved: (section: NoteSection, date: string) => `Голосовое сохранено: ${date}, ${section === 'morning' ? 'утро' : 'вечер'}.`,
+    voiceFailed: 'Не удалось сохранить голосовое. Попробуйте ещё раз.',
+    voiceTooBig: 'Файл больше 20 МБ — такой сохранить не могу.',
+    voiceDeleted: 'Голосовое удалено.',
+    voiceMorningBtn: '☀️ Утро',
+    voiceEveningBtn: '🌙 Вечер',
+    voiceYesterdayBtn: '← Вчера',
+    voiceTodayBtn: 'Сегодня →',
+    voiceDeleteBtn: 'Удалить',
   },
   en: {
     open: 'Open planner',
@@ -46,10 +57,75 @@ export const T = {
     reportAllDone: 'Everything is done. Great day.',
     reminder: (t: string, inMin: number, at: string) =>
       inMin <= 0 ? `Now: <b>${t}</b> (${at})` : `In ${inMin} min: <b>${t}</b> (${at})`,
-    help: 'Commands:\n/today — tasks for today\n/tomorrow — tasks for tomorrow\n/app — open the app\n\nAny other text becomes a task.',
+    help: 'Commands:\n/today — tasks for today\n/tomorrow — tasks for tomorrow\n/app — open the app\n\nAny other text becomes a task.\nA voice message is saved into the day notes (morning before 15:00, evening after; a caption "morning", "evening" or "yesterday" overrides).',
     privateOnly: 'The planner works in a private chat with the bot.',
+    voiceSaving: 'Saving the voice note…',
+    voiceSaved: (section: NoteSection, date: string) => `Voice note saved: ${date}, ${section === 'morning' ? 'morning' : 'evening'}.`,
+    voiceFailed: 'Could not save the voice note. Please try again.',
+    voiceTooBig: 'The file is over 20 MB — I cannot save it.',
+    voiceDeleted: 'Voice note deleted.',
+    voiceMorningBtn: '☀️ Morning',
+    voiceEveningBtn: '🌙 Evening',
+    voiceYesterdayBtn: '← Yesterday',
+    voiceTodayBtn: 'Today →',
+    voiceDeleteBtn: 'Delete',
   },
 } as const;
+
+/** Telegram voice messages above this cannot be fetched through the Bot API. */
+const VOICE_TG_MAX = 20 * 1024 * 1024;
+/** Local hour before which an unlabelled voice message lands in the morning section. */
+const MORNING_UNTIL_MIN = 15 * 60;
+const VOICE_CB_RE = /^v:([0-9a-f-]{36}):([metyd])$/i;
+
+type WaitUntil = (p: Promise<unknown>) => void;
+let currentWaitUntil: WaitUntil | null = null;
+
+/**
+ * `getBot` is cached per isolate, so handlers cannot close over a request's ExecutionContext.
+ * The webhook route sets the current one before dispatching the update.
+ */
+export function setWaitUntil(fn: WaitUntil | null): void {
+  currentWaitUntil = fn;
+}
+
+/** Runs `job` past the webhook response when an ExecutionContext is known, otherwise awaits it. */
+async function inBackground(waitUntil: WaitUntil | null, job: Promise<void>): Promise<void> {
+  if (waitUntil) {
+    try {
+      waitUntil(job);
+      return;
+    } catch {
+      /* context already closed: fall through to awaiting */
+    }
+  }
+  await job;
+}
+
+export function voiceKeyboard(note: { id: string; section: string; date: string }, today: string, lang: Lang): InlineKeyboard {
+  const t = T[lang];
+  const kb = new InlineKeyboard();
+  if (note.section === 'morning') kb.text(t.voiceEveningBtn, `v:${note.id}:e`);
+  else kb.text(t.voiceMorningBtn, `v:${note.id}:m`);
+  if (note.date === today) kb.text(t.voiceYesterdayBtn, `v:${note.id}:y`);
+  else if (note.date === addDaysISO(today, -1)) kb.text(t.voiceTodayBtn, `v:${note.id}:t`);
+  kb.row().text(t.voiceDeleteBtn, `v:${note.id}:d`);
+  return kb;
+}
+
+/** Caption keywords win over the time-of-day default. */
+export function pickVoiceTarget(caption: string | undefined, today: string, nowMin: number): { date: string; section: NoteSection } {
+  const c = (caption ?? '').toLowerCase();
+  let date = today;
+  let section: NoteSection = nowMin < MORNING_UNTIL_MIN ? 'morning' : 'evening';
+  if (/утр|morning/.test(c)) section = 'morning';
+  else if (/вечер|evening/.test(c)) section = 'evening';
+  if (/вчера|yesterday/.test(c)) {
+    date = addDaysISO(today, -1);
+    if (!/утр|morning/.test(c)) section = 'evening';
+  }
+  return { date, section };
+}
 
 const MAX_MESSAGE = 4000;
 const MAX_TITLE = 200;
@@ -235,6 +311,106 @@ export function createBot(env: Env): Bot {
     let reply = T[lang].added(esc(p.title), when);
     if (missingCategory) reply += `\n${T[lang].noCategory(esc(missingCategory))}`;
     await ctx.reply(truncateMessage(reply), { parse_mode: 'HTML', ...markup(ctx, lang) });
+  });
+
+  // Voice and audio messages become voice notes of the day. The reply goes out first and is edited
+  // once the import finishes, so a slow download never makes Telegram redeliver the update.
+  const onVoice = async (ctx: Context) => {
+    // Read before the first await: another request may replace the module-level context meanwhile.
+    const waitUntil = currentWaitUntil;
+    const msg = ctx.msg;
+    const media = msg?.voice ?? msg?.audio;
+    if (!msg || !media || !isPrivate(ctx)) return;
+    const u = await withUser(ctx);
+    if (!u) return;
+    const lang = u.settings.lang;
+    const chatId = msg.chat.id;
+    const replyTo = { reply_parameters: { message_id: msg.message_id } };
+    if ((media.file_size ?? 0) > VOICE_TG_MAX) {
+      await ctx.reply(T[lang].voiceTooBig, replyTo);
+      return;
+    }
+    const { date: today, minutes } = nowInTz(u.settings.tz);
+    const target = pickVoiceTarget(msg.caption, today, minutes);
+    const sent = await ctx.reply(T[lang].voiceSaving, replyTo);
+    const edit = (text: string, reply_markup?: InlineKeyboard) =>
+      ctx.api.editMessageText(chatId, sent.message_id, text, { reply_markup }).then(() => undefined);
+    const job = (async () => {
+      try {
+        const r = await importVoice(env, u.db, u.user.id, {
+          fileId: media.file_id,
+          fileUniqueId: media.file_unique_id,
+          mime: media.mime_type ?? (msg.voice ? 'audio/ogg' : 'audio/mpeg'),
+          durationSec: media.duration,
+          size: media.file_size ?? 0,
+          date: target.date,
+          section: target.section,
+          sentAt: msg.date,
+        });
+        if (!r.ok) {
+          await edit(r.reason === 'too_big' ? T[lang].voiceTooBig : T[lang].voiceFailed);
+          return;
+        }
+        await edit(T[lang].voiceSaved(r.note.section, r.note.date), voiceKeyboard(r.note, today, lang));
+      } catch (err) {
+        console.error('voice import failed', err);
+        await edit(T[lang].voiceFailed).catch(() => {});
+      }
+    })();
+    await inBackground(waitUntil, job);
+  };
+  bot.on('message:voice', onVoice);
+  bot.on('message:audio', onVoice);
+
+  // Correction buttons under the "saved" reply: section, day, delete.
+  bot.callbackQuery(VOICE_CB_RE, async (ctx) => {
+    const u = await withUser(ctx);
+    if (!u) return;
+    const lang = u.settings.lang;
+    const [, id, op] = ctx.match;
+    const row = await u.db
+      .select()
+      .from(voiceNotes)
+      .where(and(eq(voiceNotes.id, id), eq(voiceNotes.userId, u.user.id)))
+      .get();
+    const editText = (text: string, reply_markup?: InlineKeyboard) => ctx.editMessageText(text, { reply_markup }).catch(() => {});
+    if (!row || row.deletedAt !== null) {
+      await ctx.answerCallbackQuery({ text: T[lang].voiceDeleted });
+      await editText(T[lang].voiceDeleted);
+      return;
+    }
+    const now = Date.now();
+    const patch: Partial<typeof voiceNotes.$inferInsert> = { updatedAt: now, syncedAt: now };
+    switch (op.toLowerCase()) {
+      case 'm':
+        patch.section = 'morning';
+        break;
+      case 'e':
+        patch.section = 'evening';
+        break;
+      case 'y':
+        patch.date = addDaysISO(row.date, -1);
+        break;
+      case 't':
+        patch.date = addDaysISO(row.date, 1);
+        break;
+      case 'd':
+        patch.deletedAt = now;
+        break;
+    }
+    await u.db
+      .update(voiceNotes)
+      .set(patch)
+      .where(and(eq(voiceNotes.id, id), eq(voiceNotes.userId, u.user.id)));
+    if (patch.deletedAt) {
+      await ctx.answerCallbackQuery({ text: T[lang].voiceDeleted });
+      await editText(T[lang].voiceDeleted);
+      return;
+    }
+    const next = { ...row, ...patch };
+    const { date: today } = nowInTz(u.settings.tz);
+    await ctx.answerCallbackQuery();
+    await editText(T[lang].voiceSaved(next.section as NoteSection, next.date), voiceKeyboard(next, today, lang));
   });
 
   return bot;

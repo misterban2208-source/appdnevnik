@@ -6,8 +6,9 @@ import { asc, eq } from 'drizzle-orm';
 import type { Env } from './env.ts';
 import { validateInitData, type TelegramUser } from './auth.ts';
 import { applySync, ensureUser, getDb } from './sync.ts';
-import { getBot } from './bot.ts';
+import { getBot, setWaitUntil } from './bot.ts';
 import { claim, runCron } from './cron.ts';
+import { voiceRoutes } from './voice.ts';
 import { dayNotes, settingsFromRow, users } from './db/schema.ts';
 import { validateSyncRequest, ValidationError } from './validate.ts';
 
@@ -31,7 +32,9 @@ app.onError((err, c) => {
 });
 
 app.use('/api/*', cors({ origin: (origin) => origin || '*', allowHeaders: ['Authorization', 'Content-Type'] }));
-app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
+// JSON routes only: voice blobs carry their own limit under /api/voice/*.
+app.use('/api/sync', bodyLimit({ maxSize: 1024 * 1024 }));
+app.use('/api/export/*', bodyLimit({ maxSize: 1024 * 1024 }));
 
 app.get('/api/health', (c) => c.json({ ok: true, now: Date.now() }));
 
@@ -89,11 +92,21 @@ app.post('/api/export/notes', async (c) => {
   return c.json({ ok: true, count });
 });
 
+app.route('/api/voice', voiceRoutes);
+
 // ---- Telegram webhook: secret both in the path and in Telegram's secret-token header ----
 app.post('/bot/:secret', async (c) => {
   if (!c.env.WEBHOOK_SECRET || !constantTimeEqual(c.req.param('secret'), c.env.WEBHOOK_SECRET)) return c.text('forbidden', 403);
   const headerToken = c.req.header('X-Telegram-Bot-Api-Secret-Token');
   if (headerToken !== undefined && !constantTimeEqual(headerToken, c.env.WEBHOOK_SECRET)) return c.text('forbidden', 403);
+  // Long jobs (voice import) must outlive the webhook response so Telegram does not redeliver the update.
+  let waitUntil: ((p: Promise<unknown>) => void) | null = null;
+  try {
+    waitUntil = c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    /* no execution context (e.g. tests): handlers await instead */
+  }
+  setWaitUntil(waitUntil);
   return webhookCallback(getBot(c.env), 'hono')(c);
 });
 

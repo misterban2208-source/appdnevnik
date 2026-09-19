@@ -1,9 +1,9 @@
 import Dexie, { type Table } from 'dexie';
-import type { Category, DayNote, Occurrence, Task, UserSettings } from '@dnevnik/shared';
+import type { Category, DayNote, Occurrence, Task, UserSettings, VoiceNote } from '@dnevnik/shared';
 
 export interface OutboxEntry {
   key: string; // `${table}:${id}`
-  table: 'tasks' | 'occurrences' | 'categories' | 'notes';
+  table: 'tasks' | 'occurrences' | 'categories' | 'notes' | 'voiceNotes';
   id: string;
   updatedAt: number;
 }
@@ -13,11 +13,32 @@ export interface MetaEntry {
   value: unknown;
 }
 
+/** Raw audio bytes of a voice note; `touchedAt` drives the cache-budget eviction. */
+export interface VoiceBlobRow {
+  id: string;
+  mime: string;
+  bytes: ArrayBuffer;
+  touchedAt: number;
+}
+
+/** One row per voice note whose bytes still have to reach R2. */
+export interface VoiceQueueRow {
+  id: string;
+  attempts: number;
+  nextAt: number;
+  lastError: string | null;
+  /** The server rejected the bytes for good (deleted / too big / unsupported); no automatic retries. */
+  permanent: boolean;
+}
+
 class PlannerDB extends Dexie {
   tasks!: Table<Task, string>;
   occurrences!: Table<Occurrence, string>;
   categories!: Table<Category, string>;
   notes!: Table<DayNote, string>;
+  voiceNotes!: Table<VoiceNote, string>;
+  voiceBlobs!: Table<VoiceBlobRow, string>;
+  voiceQueue!: Table<VoiceQueueRow, string>;
   outbox!: Table<OutboxEntry, string>;
   meta!: Table<MetaEntry, string>;
 
@@ -30,6 +51,12 @@ class PlannerDB extends Dexie {
       notes: 'id, updatedAt',
       outbox: 'key, table',
       meta: 'key',
+    });
+    // Voice notes: metadata is synced, bytes stay local (and reach R2 through the upload queue).
+    this.version(2).stores({
+      voiceNotes: 'id, date, updatedAt, [date+section]',
+      voiceBlobs: 'id',
+      voiceQueue: 'id, nextAt',
     });
   }
 }

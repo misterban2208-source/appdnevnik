@@ -108,3 +108,41 @@ export const IconTrash = (p: SVGProps<SVGSVGElement>) => (
     <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
   </svg>
 );
+export const IconMic = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6" />
+  </svg>
+);
+export const IconStop = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />
+  </svg>
+);
+export const IconPause = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <rect x="7" y="6" width="3.5" height="12" rx="1" fill="currentColor" stroke="none" />
+    <rect x="13.5" y="6" width="3.5" height="12" rx="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+export const IconDownload = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+  </svg>
+);
+export const IconSend = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M21 3L10 14M21 3l-7 18-4-7-7-4z" />
+  </svg>
+);
+export const IconChat = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M4 5h16v11H9l-5 4z" />
+  </svg>
+);
+export const IconAlert = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    <path d="M12 3l10 18H2z" />
+    <path d="M12 10v5M12 18v.5" />
+  </svg>
+);

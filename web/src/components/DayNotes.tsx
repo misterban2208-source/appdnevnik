@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore, useT } from '../store/index.ts';
+import VoiceSection from './VoiceSection.tsx';
 
 function AutoTextarea({ value, placeholder, onChange }: { value: string; placeholder: string; onChange: (v: string) => void }) {
   const [local, setLocal] = useState(value);
@@ -32,10 +33,12 @@ export default function DayNotes({ date }: { date: string }) {
         <div className="note">
           <div className="nt">{t.morningNote}</div>
           <AutoTextarea value={note?.morning ?? ''} placeholder={t.morningPlaceholder} onChange={(v) => void setNote(date, 'morning', v)} />
+          <VoiceSection date={date} section="morning" />
         </div>
         <div className="note">
           <div className="nt">{t.eveningNote}</div>
           <AutoTextarea value={note?.evening ?? ''} placeholder={t.eveningPlaceholder} onChange={(v) => void setNote(date, 'evening', v)} />
+          <VoiceSection date={date} section="evening" />
         </div>
       </div>
     </>

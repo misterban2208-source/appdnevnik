@@ -1,4 +1,17 @@
-import type { Category, ChecklistItem, DayNote, Occurrence, RepeatRule, SyncRequest, Task, TaskStatus, UserSettings } from '@dnevnik/shared';
+import type {
+  Category,
+  ChecklistItem,
+  DayNote,
+  NoteSection,
+  Occurrence,
+  RepeatRule,
+  SyncRequest,
+  Task,
+  TaskStatus,
+  UserSettings,
+  VoiceNote,
+  VoiceSource,
+} from '@dnevnik/shared';
 
 export class ValidationError extends Error {
   status = 400;
@@ -14,11 +27,19 @@ export const LIMITS = {
   checklistItems: 100,
   checklistText: 500,
   reminders: 10,
+  mime: 64,
+  peaks: 48,
+  /** Above the recorder's 10-minute cap on purpose: bot audio files may be longer. */
+  voiceMs: 3_600_000,
 };
 
 const STATUSES: TaskStatus[] = ['todo', 'in_progress', 'done', 'cancelled', 'moved'];
 const REPEATS = ['daily', 'weekdays', 'weekly', 'monthly', 'custom'];
+const SECTIONS: NoteSection[] = ['morning', 'evening'];
+const VOICE_SOURCES: VoiceSource[] = ['app', 'bot'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const UUID_RE = /^[0-9a-f-]{36}$/i;
+export const MIME_RE = /^audio\/[\w.+-]+(;[\w=.\s"-]+)?$/;
 
 function fail(msg: string): never {
   throw new ValidationError(msg);
@@ -155,6 +176,35 @@ export function validateNote(v: unknown, now: number): DayNote {
   };
 }
 
+export function validateVoiceNote(v: unknown, now: number): VoiceNote {
+  if (!v || typeof v !== 'object') fail('voiceNote');
+  const o = v as Record<string, unknown>;
+  const id = str(o.id, 36, 'id', false);
+  if (!UUID_RE.test(id)) fail('id: bad uuid');
+  if (typeof o.section !== 'string' || !SECTIONS.includes(o.section as NoteSection)) fail('section');
+  const mime = str(o.mime, LIMITS.mime + 1, 'mime', false);
+  if (mime.length > LIMITS.mime || !MIME_RE.test(mime)) fail('mime');
+  const source = o.source === undefined ? 'app' : o.source;
+  if (typeof source !== 'string' || !VOICE_SOURCES.includes(source as VoiceSource)) fail('source');
+  const createdAt = timestamp(o.createdAt ?? now, 'createdAt', now);
+  return {
+    id,
+    userId: 0,
+    date: isoDate(o.date, 'date'),
+    section: o.section as NoteSection,
+    mime,
+    duration: Math.round(num(o.duration ?? 0, 'duration', 0, LIMITS.voiceMs)),
+    size: Math.round(num(o.size ?? 0, 'size', 0)),
+    peaks: str(o.peaks ?? '', LIMITS.peaks, 'peaks'),
+    source: source as VoiceSource,
+    createdAt,
+    updatedAt: timestamp(o.updatedAt ?? createdAt, 'updatedAt', now),
+    deletedAt: o.deletedAt === null || o.deletedAt === undefined ? null : timestamp(o.deletedAt, 'deletedAt', now),
+    // Server-owned: whatever the client sent is ignored.
+    uploadedAt: null,
+  };
+}
+
 function list<T>(v: unknown, field: string, fn: (x: unknown) => T): T[] {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v)) fail(`${field}: expected array`);
@@ -174,5 +224,6 @@ export function validateSyncRequest(body: unknown, now: number): SyncRequest {
     occurrences: list(o.occurrences, 'occurrences', (x) => validateOccurrence(x, now)),
     categories: list(o.categories, 'categories', (x) => validateCategory(x, now)),
     notes: list(o.notes, 'notes', (x) => validateNote(x, now)),
+    voiceNotes: list(o.voiceNotes, 'voiceNotes', (x) => validateVoiceNote(x, now)),
   };
 }

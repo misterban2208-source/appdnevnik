@@ -16,6 +16,11 @@ database_name = "dnevnik"
 database_id = "REPLACE_WITH_D1_ID"
 migrations_dir = "migrations"
 
+# Voice note blobs. Create once: `npx wrangler r2 bucket create dnevnik-voice` (see README, "R2").
+[[r2_buckets]]
+binding = "VOICE"
+bucket_name = "dnevnik-voice"
+
 [triggers]
 crons = ["* * * * *"]
 

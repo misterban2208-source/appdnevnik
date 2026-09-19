@@ -1,5 +1,5 @@
 import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
-import type { Category, DayNote, Occurrence, Task, UserSettings } from '@dnevnik/shared';
+import type { Category, DayNote, Occurrence, Task, UserSettings, VoiceNote } from '@dnevnik/shared';
 import { DEFAULT_SETTINGS } from '@dnevnik/shared';
 
 export const users = sqliteTable('users', {
@@ -67,6 +67,27 @@ export const dayNotes = sqliteTable('day_notes', {
   evening: text('evening').notNull().default(''),
   updatedAt: integer('updated_at').notNull(),
   syncedAt: integer('synced_at').notNull().default(0),
+});
+
+export const voiceNotes = sqliteTable('voice_notes', {
+  id: text('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  date: text('date').notNull(),
+  section: text('section').notNull(),
+  mime: text('mime').notNull(),
+  duration: integer('duration').notNull().default(0),
+  size: integer('size').notNull().default(0),
+  peaks: text('peaks').notNull().default(''),
+  source: text('source').notNull().default('app'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+  syncedAt: integer('synced_at').notNull().default(0),
+  deletedAt: integer('deleted_at'),
+  // Server-owned columns: never written by the sync upsert, never exposed to clients except uploadedAt.
+  r2Key: text('r2_key'),
+  uploadedAt: integer('uploaded_at'),
+  tgFileId: text('tg_file_id'),
+  tgFileUniqueId: text('tg_file_unique_id'),
 });
 
 export const sentNotifications = sqliteTable('sent_notifications', {
@@ -189,6 +210,42 @@ export function noteToRow(n: DayNote, userId: number): typeof dayNotes.$inferIns
     morning: n.morning ?? '',
     evening: n.evening ?? '',
     updatedAt: n.updatedAt,
+  };
+}
+
+export function voiceFromRow(r: typeof voiceNotes.$inferSelect): VoiceNote {
+  return {
+    id: r.id,
+    userId: r.userId,
+    date: r.date,
+    section: r.section as VoiceNote['section'],
+    mime: r.mime,
+    duration: r.duration,
+    size: r.size,
+    peaks: r.peaks,
+    source: r.source as VoiceNote['source'],
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    deletedAt: r.deletedAt,
+    uploadedAt: r.uploadedAt,
+  };
+}
+
+/** Client-owned columns only, so a sync upsert can never clear r2_key, uploaded_at or the Telegram ids. */
+export function voiceToRow(v: VoiceNote, userId: number): typeof voiceNotes.$inferInsert {
+  return {
+    id: v.id,
+    userId,
+    date: v.date,
+    section: v.section,
+    mime: v.mime,
+    duration: v.duration ?? 0,
+    size: v.size ?? 0,
+    peaks: v.peaks ?? '',
+    source: v.source ?? 'app',
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+    deletedAt: v.deletedAt ?? null,
   };
 }
 

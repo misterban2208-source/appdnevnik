@@ -57,6 +57,38 @@ export function tgUser() {
   return tg.initDataUnsafe?.user ?? null;
 }
 
+/** 'ios' | 'android' | 'android_x' | 'macos' | 'tdesktop' | 'weba' | 'web' | 'unknown' (also 'unknown' in a plain browser tab). */
+export function platform(): string {
+  try {
+    return (tg as { platform?: string }).platform || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** Asks Telegram to confirm before closing the app (6.2+); silently ignored elsewhere. */
+export function enableClosingConfirmation(): void {
+  if (!isInTelegram() || !versionAtLeast('6.2')) return;
+  try { tg.enableClosingConfirmation(); } catch { /* noop */ }
+}
+
+export function disableClosingConfirmation(): void {
+  if (!isInTelegram() || !versionAtLeast('6.2')) return;
+  try { tg.disableClosingConfirmation(); } catch { /* noop */ }
+}
+
+/** Resolves true when the bot may write to the user (or when the question cannot be asked at all). */
+export function requestWriteAccess(): Promise<boolean> {
+  if (!isInTelegram() || !versionAtLeast('6.9')) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    try {
+      tg.requestWriteAccess((granted) => resolve(Boolean(granted)));
+    } catch {
+      resolve(true);
+    }
+  });
+}
+
 let hapticsEnabled = true;
 export function setHapticsEnabled(v: boolean) {
   hapticsEnabled = v;

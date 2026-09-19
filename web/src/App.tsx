@@ -14,6 +14,7 @@ import QuickAdd from './components/QuickAdd.tsx';
 import Toast from './components/Toast.tsx';
 import { IconPlus } from './components/Icons.tsx';
 import { haptic } from './lib/telegram.ts';
+import { pumpVoiceUploads } from './lib/voice.ts';
 
 export default function App() {
   const ready = useStore((s) => s.ready);
@@ -30,7 +31,10 @@ export default function App() {
         void useStore.getState().sync();
       }
     };
-    const onOnline = () => void useStore.getState().sync();
+    const onOnline = () => {
+      void useStore.getState().sync();
+      void pumpVoiceUploads();
+    };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
     const id = setInterval(() => {

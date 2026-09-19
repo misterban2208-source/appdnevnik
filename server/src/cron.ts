@@ -4,6 +4,7 @@ import { hhmmToMinutes, minutesToHHMM, nowInTz } from '@dnevnik/shared';
 import type { Env } from './env.ts';
 import { dayMessage, esc, getBot, loadDayInstances, T, truncateMessage, webAppKeyboard } from './bot.ts';
 import { carryRootId, getDb, type DB } from './sync.ts';
+import { purgeDeletedVoice } from './voice.ts';
 import { sentNotifications, settingsFromRow, taskFromRow, tasks, users } from './db/schema.ts';
 
 /** Tolerance window so a missed cron tick still fires (minutes). */
@@ -144,6 +145,15 @@ export async function runCron(env: Env, at = new Date()): Promise<void> {
       }
     } catch (err) {
       console.error('cron user failed', u.id, err);
+    }
+  }
+
+  // 5. Hourly: free R2 objects of voice notes deleted more than a day ago (the undo window is long gone).
+  if (await claim(db, `voicepurge:${Math.floor(nowMs / 3_600_000)}`)) {
+    try {
+      await purgeDeletedVoice(env, db, nowMs - 24 * 3_600_000);
+    } catch (err) {
+      console.error('voice purge failed', err);
     }
   }
 }

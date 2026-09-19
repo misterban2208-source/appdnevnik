@@ -73,6 +73,34 @@ export interface DayNote {
   updatedAt: number;
 }
 
+export type NoteSection = 'morning' | 'evening';
+export type VoiceSource = 'app' | 'bot';
+
+/** Metadata of a voice note. Bytes live on the device (Dexie) and, once backed up, in R2. */
+export interface VoiceNote {
+  id: string;
+  userId: number;
+  date: string;
+  section: NoteSection;
+  /** Exact container/codec string the bytes were produced with, e.g. 'audio/mp4', 'audio/webm;codecs=opus'. */
+  mime: string;
+  /** Milliseconds, timer-measured (fragmented MP4 carries no duration). */
+  duration: number;
+  size: number;
+  /** 48 chars [0-9a-z] loudness buckets; '' when unknown. */
+  peaks: string;
+  source: VoiceSource;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt: number | null;
+  /** Server-owned: when the bytes became downloadable. Ignored when sent by clients; merged monotonically. */
+  uploadedAt: number | null;
+}
+
+export const VOICE_MAX_MS = 600_000;
+export const VOICE_MIN_MS = 700;
+export const VOICE_MAX_BYTES = 25 * 1024 * 1024;
+
 export type FontVariant = 'serif' | 'sans';
 export type Lang = 'ru' | 'en';
 
@@ -118,6 +146,7 @@ export interface SyncPayload {
   occurrences: Occurrence[];
   categories: Category[];
   notes: DayNote[];
+  voiceNotes: VoiceNote[];
 }
 
 export interface SyncRequest extends SyncPayload {

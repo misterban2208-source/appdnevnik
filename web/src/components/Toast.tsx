@@ -37,7 +37,7 @@ export default function Toast() {
                 dismiss();
               }}
             >
-              {t.undo}
+              {toast.actionLabel ?? t.undo}
             </button>
           )}
           <motion.div className="bar" initial={{ width: '100%' }} animate={{ width: 0 }} transition={{ duration: DURATION / 1000, ease: 'linear' }} />

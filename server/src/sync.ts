@@ -1,6 +1,6 @@
 import { and, eq, gt, inArray, like } from 'drizzle-orm';
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
-import type { Category, DayNote, Occurrence, SyncRequest, SyncResponse, Task, UserSettings } from '@dnevnik/shared';
+import type { Category, DayNote, Occurrence, SyncRequest, SyncResponse, Task, UserSettings, VoiceNote } from '@dnevnik/shared';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, hhmmToMinutes } from '@dnevnik/shared';
 import {
   categories,
@@ -17,6 +17,9 @@ import {
   tasks,
   taskToRow,
   users,
+  voiceFromRow,
+  voiceNotes,
+  voiceToRow,
 } from './db/schema.ts';
 import type { TelegramUser } from './auth.ts';
 
@@ -74,7 +77,7 @@ export async function ensureUser(db: DB, tg: TelegramUser): Promise<typeof users
   return row;
 }
 
-type AnyTable = typeof tasks | typeof occurrences | typeof categories | typeof dayNotes;
+type AnyTable = typeof tasks | typeof occurrences | typeof categories | typeof dayNotes | typeof voiceNotes;
 
 async function upsertLWW<TRow extends { id: string; updatedAt: number }>(
   db: DB,
@@ -114,17 +117,19 @@ async function upsertLWW<TRow extends { id: string; updatedAt: number }>(
 }
 
 export async function loadChangedSince(db: DB, userId: number, since: number) {
-  const [t, o, c, n] = await Promise.all([
+  const [t, o, c, n, v] = await Promise.all([
     db.select().from(tasks).where(and(eq(tasks.userId, userId), gt(tasks.syncedAt, since))).all(),
     db.select().from(occurrences).where(and(eq(occurrences.userId, userId), gt(occurrences.syncedAt, since))).all(),
     db.select().from(categories).where(and(eq(categories.userId, userId), gt(categories.syncedAt, since))).all(),
     db.select().from(dayNotes).where(and(eq(dayNotes.userId, userId), gt(dayNotes.syncedAt, since))).all(),
+    db.select().from(voiceNotes).where(and(eq(voiceNotes.userId, userId), gt(voiceNotes.syncedAt, since))).all(),
   ]);
   return {
     tasks: t.map(taskFromRow),
     occurrences: o.map(occurrenceFromRow),
     categories: c.map(categoryFromRow),
     notes: n.map(noteFromRow),
+    voiceNotes: v.map(voiceFromRow),
   };
 }
 
@@ -180,6 +185,7 @@ export async function applySync(db: DB, user: typeof users.$inferSelect, req: Sy
   await upsertLWW(db, occurrences, userId, (req.occurrences ?? []).map((o: Occurrence) => occurrenceToRow(o, userId)) as never, syncedAt);
   await upsertLWW(db, categories, userId, (req.categories ?? []).map((c: Category) => categoryToRow(c, userId)) as never, syncedAt);
   await upsertLWW(db, dayNotes, userId, (req.notes ?? []).map((n: DayNote) => noteToRow(n, userId)) as never, syncedAt);
+  await upsertLWW(db, voiceNotes, userId, (req.voiceNotes ?? []).map((v: VoiceNote) => voiceToRow(v, userId)) as never, syncedAt);
 
   let settings = settingsFromRow(user.settings);
   if (req.settings) {

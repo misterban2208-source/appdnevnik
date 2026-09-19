@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Category, DayNote, Occurrence, Task, TaskInstance, TaskStatus, UserSettings } from '@dnevnik/shared';
+import type { Category, DayNote, NoteSection, Occurrence, Task, TaskInstance, TaskStatus, UserSettings, VoiceNote } from '@dnevnik/shared';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, addDays, compareISO, occurrenceId, toISODate } from '@dnevnik/shared';
 import { db, getMeta, setMeta, type SettingsMeta } from '../lib/db.ts';
 import { syncOnce } from '../lib/sync.ts';
@@ -7,6 +7,8 @@ import { ApiError } from '../lib/api.ts';
 import { haptic, setHapticsEnabled, tgUser } from '../lib/telegram.ts';
 import { uuid } from '../lib/util.ts';
 import { getDict, type Dict } from '../i18n/index.ts';
+import { recorderErrorKey, setRecorderHandlers, type Take, type TakeContext } from '../lib/recorder.ts';
+import { EMPTY_LOCAL, player, prefetchVoice, pumpVoiceUploads, reconcileVoice, rememberBytes, revokeUrl, setVoiceSink, type VoiceLocal } from '../lib/voice.ts';
 
 /** Carry-over copies derive from the root task id so client and server converge. */
 export function carryRootId(id: string): string {
@@ -28,6 +30,8 @@ export interface Toast {
   id: number;
   message: string;
   undo?: () => void;
+  /** Button caption for `undo`; defaults to the dictionary's "undo". */
+  actionLabel?: string;
 }
 
 interface State {
@@ -49,6 +53,9 @@ interface State {
   toast: Toast | null;
   selectedBlockId: string | null;
   userName: string;
+  voiceNotes: Record<string, VoiceNote>;
+  /** Device-only facts about each voice note (bytes present, upload progress, errors). */
+  voiceLocal: Record<string, VoiceLocal>;
 
   init(): Promise<void>;
   setDate(d: string): void;
@@ -57,7 +64,7 @@ interface State {
   setQuickAdd(open: boolean): void;
   setSettingsOpen(open: boolean): void;
   selectBlock(id: string | null): void;
-  showToast(message: string, undo?: () => void): void;
+  showToast(message: string, undo?: () => void, actionLabel?: string): void;
   dismissToast(): void;
 
   updateSettings(patch: Partial<UserSettings>): Promise<void>;
@@ -75,6 +82,9 @@ interface State {
   setNote(date: string, field: 'morning' | 'evening', text: string): Promise<void>;
   runCarryover(): Promise<void>;
   sync(): Promise<void>;
+  addVoiceNote(date: string, section: NoteSection, take: Take): Promise<VoiceNote | null>;
+  deleteVoiceNote(id: string): Promise<void>;
+  restoreVoiceNote(id: string): Promise<void>;
 }
 
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -88,7 +98,7 @@ function scheduleSync(get: () => State, delay = 1200) {
   }, delay);
 }
 
-async function persist(table: 'tasks' | 'occurrences' | 'categories' | 'notes', entity: { id: string; updatedAt: number }) {
+async function persist(table: 'tasks' | 'occurrences' | 'categories' | 'notes' | 'voiceNotes', entity: { id: string; updatedAt: number }) {
   await db.transaction('rw', db[table], db.outbox, async () => {
     await (db[table] as unknown as { put: (v: unknown) => Promise<unknown> }).put(entity);
     await db.outbox.put({ key: `${table}:${entity.id}`, table, id: entity.id, updatedAt: entity.updatedAt });
@@ -97,6 +107,23 @@ async function persist(table: 'tasks' | 'occurrences' | 'categories' | 'notes', 
 
 function applyFont(font: UserSettings['font']) {
   document.documentElement.setAttribute('data-font', font);
+}
+
+/** Last-write-wins on updatedAt, but `uploadedAt` is server-owned and only ever gains a value. */
+function mergeVoiceInto(cur: Record<string, VoiceNote>, rows: VoiceNote[]): Record<string, VoiceNote> {
+  const out = { ...cur };
+  for (const r of rows) {
+    const c = out[r.id];
+    const base = !c || r.updatedAt >= c.updatedAt ? r : c;
+    const uploadedAt = r.uploadedAt ?? c?.uploadedAt ?? base.uploadedAt ?? null;
+    out[r.id] = base.uploadedAt === uploadedAt ? base : { ...base, uploadedAt };
+  }
+  return out;
+}
+
+function isQuotaError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : '';
+  return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED' || /quota/i.test(String((err as Error)?.message ?? ''));
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -118,8 +145,28 @@ export const useStore = create<State>((set, get) => ({
   toast: null,
   selectedBlockId: null,
   userName: '',
+  voiceNotes: {},
+  voiceLocal: {},
 
   async init() {
+    // Voice notes live outside React (recorder + upload queue); they report back through these sinks.
+    setVoiceSink({
+      setLocal: (id, patch) => set((s) => ({ voiceLocal: { ...s.voiceLocal, [id]: { ...(s.voiceLocal[id] ?? EMPTY_LOCAL), ...patch } } })),
+      noteUpdated: (note) => set((s) => ({ voiceNotes: { ...s.voiceNotes, [note.id]: note } })),
+    });
+    setRecorderHandlers({
+      onTake: (take: Take, ctx: TakeContext) => {
+        void get()
+          .addVoiceNote(ctx.date, ctx.section, take)
+          .then((note) => {
+            if (note && ctx.reason === 'max') get().showToast(getDict(get().settings.lang).voiceMaxLength);
+          });
+      },
+      onError: (err: unknown) => {
+        haptic.error();
+        get().showToast(getDict(get().settings.lang)[recorderErrorKey(err)]);
+      },
+    });
     const settingsMeta = await getMeta<SettingsMeta | null>('settings', null);
     const lastSync = await getMeta<number>('lastSync', 0);
     const user = await getMeta<{ firstName: string } | null>('user', null);
@@ -130,11 +177,12 @@ export const useStore = create<State>((set, get) => ({
       ? { ...DEFAULT_SETTINGS, ...settingsMeta.settings }
       : { ...DEFAULT_SETTINGS, lang: (tgUser()?.language_code?.startsWith('ru') ? 'ru' : browserLang) as UserSettings['lang'], tz: browserTz };
     const dirty = settingsMeta?.dirty ?? false;
-    const [tasks, occurrences, categories, notes] = await Promise.all([
+    const [tasks, occurrences, categories, notes, voiceRows] = await Promise.all([
       db.tasks.toArray(),
       db.occurrences.toArray(),
       db.categories.toArray(),
       db.notes.toArray(),
+      db.voiceNotes.toArray(),
     ]);
     applyFont(settings.font);
     setHapticsEnabled(settings.haptics);
@@ -148,7 +196,11 @@ export const useStore = create<State>((set, get) => ({
       occurrences: Object.fromEntries(occurrences.map((o) => [o.id, o])),
       categories: Object.fromEntries(categories.map((c) => [c.id, c])),
       notes: Object.fromEntries(notes.map((n) => [n.id, n])),
+      voiceNotes: Object.fromEntries(voiceRows.map((v) => [v.id, v])),
     });
+    // Blob flags and the upload queue are rebuilt from IndexedDB before anything can play or upload.
+    await reconcileVoice().catch(() => {});
+    void navigator.storage?.persist?.().catch(() => false);
     await get().sync();
     // The device time zone drives reminders; push it as a settings change only after the pull.
     if (browserTz && get().settings.tz !== browserTz) await get().updateSettings({ tz: browserTz });
@@ -182,8 +234,8 @@ export const useStore = create<State>((set, get) => ({
   selectBlock(id) {
     set({ selectedBlockId: id });
   },
-  showToast(message, undo) {
-    set({ toast: { id: ++toastSeq, message, undo } });
+  showToast(message, undo, actionLabel) {
+    set({ toast: { id: ++toastSeq, message, undo, actionLabel } });
   },
   dismissToast() {
     set({ toast: null });
@@ -422,11 +474,12 @@ export const useStore = create<State>((set, get) => ({
     const sentDirty = get().settingsDirty;
     try {
       const res = await syncOnce({ settings: sentSettings, dirty: sentDirty });
-      const [tasks, occurrences, categories, notes] = await Promise.all([
+      const [tasks, occurrences, categories, notes, voiceRows] = await Promise.all([
         db.tasks.toArray(),
         db.occurrences.toArray(),
         db.categories.toArray(),
         db.notes.toArray(),
+        db.voiceNotes.toArray(),
       ]);
       // A settings change made while the request was in flight must stay dirty and be pushed next time.
       const settingsChangedMeanwhile = get().settings !== sentSettings;
@@ -452,10 +505,15 @@ export const useStore = create<State>((set, get) => ({
         occurrences: mergeInto(s.occurrences, occurrences),
         categories: mergeInto(s.categories, categories),
         notes: mergeInto(s.notes, notes),
+        voiceNotes: mergeVoiceInto(s.voiceNotes, voiceRows),
         syncStatus: pending || settingsChangedMeanwhile ? 'pending' : 'ok',
         lastSync: Date.now(),
       }));
       if (pending || settingsChangedMeanwhile) scheduleSync(get, 1500);
+      // Bytes follow the metadata: queue uploads for new takes, warm the cache for the visible days.
+      await reconcileVoice().catch(() => {});
+      void pumpVoiceUploads();
+      void prefetchVoice(Array.from(new Set([get().currentDate, get().today])));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         set({ syncStatus: 'expired' });
@@ -464,6 +522,92 @@ export const useStore = create<State>((set, get) => ({
         set({ syncStatus: 'error' });
       }
     }
+  },
+
+  async addVoiceNote(date, section, take) {
+    const now = Date.now();
+    const id = uuid();
+    const bytes = await take.blob.arrayBuffer();
+    const note: VoiceNote = {
+      id,
+      userId: 0,
+      date,
+      section,
+      mime: take.mime,
+      duration: take.durationMs,
+      size: bytes.byteLength,
+      peaks: take.peaks,
+      source: 'app',
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      uploadedAt: null,
+    };
+    const queueRow = { id, attempts: 0, nextAt: now, lastError: null, permanent: false };
+    let quota = false;
+    try {
+      // Metadata, bytes and the upload intent land together or not at all.
+      await db.transaction('rw', db.voiceNotes, db.voiceBlobs, db.voiceQueue, db.outbox, async () => {
+        await db.voiceNotes.put(note);
+        await db.voiceBlobs.put({ id, mime: take.mime, bytes, touchedAt: now });
+        await db.voiceQueue.put(queueRow);
+        await db.outbox.put({ key: `voiceNotes:${id}`, table: 'voiceNotes', id, updatedAt: now });
+      });
+    } catch (err) {
+      if (!isQuotaError(err)) {
+        haptic.error();
+        get().showToast(getDict(get().settings.lang).voiceError);
+        return null;
+      }
+      // No room for the bytes on disk: keep them for this session so the take can still upload and play.
+      quota = true;
+      rememberBytes(id, { bytes, mime: take.mime });
+      try {
+        await db.transaction('rw', db.voiceNotes, db.voiceQueue, db.outbox, async () => {
+          await db.voiceNotes.put(note);
+          await db.voiceQueue.put(queueRow);
+          await db.outbox.put({ key: `voiceNotes:${id}`, table: 'voiceNotes', id, updatedAt: now });
+        });
+      } catch {
+        haptic.error();
+        get().showToast(getDict(get().settings.lang).storageFull);
+        return null;
+      }
+    }
+    set((s) => ({
+      voiceNotes: { ...s.voiceNotes, [id]: note },
+      voiceLocal: { ...s.voiceLocal, [id]: { ...EMPTY_LOCAL, hasBlob: true } },
+      syncStatus: 'pending',
+    }));
+    haptic.success();
+    if (quota) get().showToast(getDict(get().settings.lang).storageFull);
+    scheduleSync(get);
+    void pumpVoiceUploads();
+    return note;
+  },
+
+  async deleteVoiceNote(id) {
+    const n = get().voiceNotes[id];
+    if (!n || n.deletedAt) return;
+    if (player.getState().id === id) player.pause();
+    const t = { ...n, deletedAt: Date.now(), updatedAt: Date.now() };
+    set((s) => ({ voiceNotes: { ...s.voiceNotes, [id]: t }, syncStatus: 'pending' }));
+    await persist('voiceNotes', t);
+    haptic.medium();
+    scheduleSync(get);
+    get().showToast(getDict(get().settings.lang).voiceDeleted, () => void get().restoreVoiceNote(id));
+  },
+
+  async restoreVoiceNote(id) {
+    const n = get().voiceNotes[id];
+    if (!n) return;
+    const r = { ...n, deletedAt: null, updatedAt: Date.now() };
+    set((s) => ({ voiceNotes: { ...s.voiceNotes, [id]: r }, syncStatus: 'pending' }));
+    await persist('voiceNotes', r);
+    revokeUrl(id);
+    scheduleSync(get);
+    await reconcileVoice().catch(() => {});
+    void pumpVoiceUploads();
   },
 }));
 
