@@ -9,6 +9,7 @@
     "db:migrate:local": "wrangler d1 migrations apply dnevnik --local",
     "db:migrate": "wrangler d1 migrations apply dnevnik --remote",
     "setup:bot": "node scripts/setup-bot.mjs",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
