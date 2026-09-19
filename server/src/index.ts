@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
 import { InputFile, webhookCallback } from 'grammy';
@@ -27,6 +28,7 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 app.onError((err, c) => {
   if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+  if (err instanceof HTTPException) return err.getResponse();
   console.error('unhandled', err);
   return c.json({ error: 'internal' }, 500);
 });

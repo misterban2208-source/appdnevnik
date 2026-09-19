@@ -145,9 +145,16 @@ export function esc(s: string): string {
   return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** Telegram rejects messages above 4096 characters. */
+/** Telegram rejects messages above 4096 characters; the cut must not leave HTML half-open. */
 export function truncateMessage(s: string): string {
-  return s.length > MAX_MESSAGE ? `${s.slice(0, MAX_MESSAGE)}…` : s;
+  if (s.length <= MAX_MESSAGE) return s;
+  let out = s.slice(0, MAX_MESSAGE).replace(/<[^>]*$/, '');
+  for (const tag of ['code', 'b', 'i']) {
+    const opens = (out.match(new RegExp(`<${tag}>`, 'g')) ?? []).length;
+    const closes = (out.match(new RegExp(`</${tag}>`, 'g')) ?? []).length;
+    if (opens > closes) out += `</${tag}>`;
+  }
+  return `${out}…`;
 }
 
 export function webAppKeyboard(env: Env, lang: Lang): InlineKeyboard {
@@ -252,6 +259,8 @@ export function createBot(env: Env): Bot {
 
   // Any plain text becomes a task via quick parse. Unknown commands get the help text.
   bot.on('message:text', async (ctx) => {
+    // Quick-add is a private-chat feature: group chats would create tasks and collide on message ids.
+    if (!isPrivate(ctx)) return;
     const u = await withUser(ctx);
     if (!u) return;
     const lang = u.settings.lang;

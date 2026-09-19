@@ -33,7 +33,7 @@ npm test                                        # тесты парсера
 5. Секреты (в папке `server`):
    ```bash
    npx wrangler secret put BOT_TOKEN
-   npx wrangler secret put WEBHOOK_SECRET      # любая длинная случайная строка
+   npx wrangler secret put WEBHOOK_SECRET      # 32+ случайных символов A-Z a-z 0-9 _ - (других Telegram не принимает)
    ```
 6. В `server/wrangler.toml` укажите `WEBAPP_URL` — адрес воркера, например `https://dnevnik.<account>.workers.dev`.
 7. Соберите и задеплойте: `npm run deploy` (из корня).

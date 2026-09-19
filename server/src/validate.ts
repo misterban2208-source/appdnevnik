@@ -57,9 +57,11 @@ function num(v: unknown, field: string, min = -Infinity, max = Infinity): number
   return v;
 }
 
+/** Out-of-range minutes are clamped, not rejected: a single odd value must never block a device's sync forever. */
 function optNum(v: unknown, field: string, min: number, max: number): number | null {
   if (v === null || v === undefined) return null;
-  return Math.round(num(v, field, min, max));
+  const n = num(v, field);
+  return Math.round(Math.max(min, Math.min(max, n)));
 }
 
 function isoDate(v: unknown, field: string): string {

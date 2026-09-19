@@ -202,14 +202,14 @@ export const useStore = create<State>((set, get) => ({
     await reconcileVoice().catch(() => {});
     void navigator.storage?.persist?.().catch(() => false);
     await get().sync();
-    // The device time zone drives reminders; push it as a settings change only after the pull.
-    if (browserTz && get().settings.tz !== browserTz) await get().updateSettings({ tz: browserTz });
-    // Fresh install that could not reach the server: seed defaults locally with the server's ids.
+    // Fresh install that could not reach the server: seed defaults locally with the server's ids and an
+    // ancient timestamp, so the user's customised categories win the moment the first pull succeeds.
     const uid = tgUser()?.id;
     if (uid && get().syncStatus !== 'ok' && !Object.keys(get().categories).length && !get().lastSync) {
-      const now = Date.now();
       for (const [i, c] of DEFAULT_CATEGORIES.entries()) {
-        await get().saveCategory({ id: `${uid}:cat:${i}`, userId: uid, name: c.name[get().settings.lang], color: c.color, sortOrder: i, updatedAt: now + i, deletedAt: null });
+        const cat: Category = { id: `${uid}:cat:${i}`, userId: uid, name: c.name[get().settings.lang], color: c.color, sortOrder: i, updatedAt: 1 + i, deletedAt: null };
+        set((s) => ({ categories: { ...s.categories, [cat.id]: cat } }));
+        await persist('categories', cat);
       }
     }
     await get().runCarryover();
@@ -497,6 +497,9 @@ export const useStore = create<State>((set, get) => ({
         }
         return out;
       };
+      // The device time zone drives reminders; it is pushed only on top of a successfully pulled settings object.
+      const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (browserTz && settings.tz !== browserTz && !settingsChangedMeanwhile) setTimeout(() => void get().updateSettings({ tz: browserTz }), 0);
       set((s) => ({
         settings,
         settingsDirty: settingsChangedMeanwhile,

@@ -9,8 +9,8 @@ import { sentNotifications, settingsFromRow, taskFromRow, tasks, users } from '.
 
 /** Tolerance window so a missed cron tick still fires (minutes). */
 const WINDOW = 3;
-/** Users who have not opened the app or the bot for this long are skipped. */
-const INACTIVE_MS = 60 * 24 * 3600 * 1000;
+/** Users who have not opened the app or the bot for this long are skipped (recurring reminders keep going for half a year). */
+const INACTIVE_MS = 180 * 24 * 3600 * 1000;
 const PRUNE_AFTER_MS = 3 * 24 * 3600 * 1000;
 
 function inWindow(fireAt: number, nowMin: number): boolean {

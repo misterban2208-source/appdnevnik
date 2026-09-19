@@ -27,6 +27,8 @@ export type DB = DrizzleD1Database;
 
 /** D1 allows at most 100 bound parameters per statement. */
 const ID_CHUNK = 50;
+/** How far behind "now" the pull cursor is set; must exceed the longest concurrent write. */
+const CURSOR_OVERLAP_MS = 60_000;
 
 export function getDb(d1: D1Database): DB {
   return drizzle(d1);
@@ -105,7 +107,11 @@ async function upsertLWW<TRow extends { id: string; updatedAt: number }>(
       await db.insert(table).values(withStamp as never).onConflictDoNothing();
     } else {
       let apply = row.updatedAt > prev.updatedAt;
-      if (!apply && onConflictHook) apply = (await onConflictHook(row, prev)) === true;
+      // The hook may force the write and must then make it win on every device (server clock).
+      if (onConflictHook && (await onConflictHook(row, prev)) === true) {
+        apply = true;
+        (withStamp as { updatedAt: number }).updatedAt = Math.max(row.updatedAt, syncedAt);
+      }
       if (apply) {
         await db
           .update(table)
@@ -161,7 +167,7 @@ function sanitizeSettings(s: Partial<UserSettings> | undefined, prev: UserSettin
 
 /**
  * A client's explicit completion of a task that the server auto-carried must win over the
- * synthetic 'moved' status, and the carried copy must disappear.
+ * synthetic 'moved' status (whatever the clocks say), and the carried copy must disappear.
  */
 async function completionBeatsCarryOver(db: DB, userId: number, incoming: Task, existing: { status?: string | null }, syncedAt: number): Promise<boolean> {
   if (existing.status !== 'moved') return false;
@@ -175,8 +181,9 @@ async function completionBeatsCarryOver(db: DB, userId: number, incoming: Task, 
 
 export async function applySync(db: DB, user: typeof users.$inferSelect, req: SyncRequest): Promise<SyncResponse> {
   const userId = user.id;
-  // Cursor is taken before our own writes so nothing written concurrently is skipped next time.
-  const cursor = Date.now() - 1;
+  // Cursor is taken before our own writes, with an overlap so a concurrent request or cron tick that
+  // stamped its rows slightly earlier but committed later is still delivered next time (LWW makes repeats harmless).
+  const cursor = Date.now() - CURSOR_OVERLAP_MS;
   const syncedAt = Date.now();
 
   await upsertLWW(db, tasks, userId, (req.tasks ?? []).map((t: Task) => taskToRow(t, userId)) as never, syncedAt, (inc, ex) =>

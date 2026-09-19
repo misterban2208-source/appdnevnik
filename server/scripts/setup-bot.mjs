@@ -19,6 +19,10 @@ if (!BOT_TOKEN || !WEBAPP_URL || !WEBHOOK_SECRET) {
   console.error('Need BOT_TOKEN, WEBAPP_URL and WEBHOOK_SECRET (env or server/.dev.vars).');
   process.exit(1);
 }
+if (!/^[A-Za-z0-9_-]{1,256}$/.test(WEBHOOK_SECRET)) {
+  console.error('WEBHOOK_SECRET may only contain A-Z, a-z, 0-9, _ and - (1-256 chars): Telegram rejects anything else as secret_token.');
+  process.exit(1);
+}
 
 async function call(method, body) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
