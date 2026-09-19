@@ -61,12 +61,14 @@ export default function TaskRow({ inst, showDate, onOpen, index = 0 }: Props) {
           axis.current = a;
         }}
         onDragStart={() => {
+          // onDragStart is deferred to the next frame, so the axis must not be reset here:
+          // onDirectionLock may already have fired for this gesture.
           dragged.current = true;
-          axis.current = null;
         }}
         onDragEnd={(_, info) => {
           // Delete only on a genuinely horizontal swipe (a vertical mouse drag also reports an x offset).
           if (axis.current === 'x' && info.offset.x < -90 && Math.abs(info.offset.x) > Math.abs(info.offset.y)) remove();
+          axis.current = null;
           // A click event follows the drag; swallow it.
           setTimeout(() => {
             dragged.current = false;

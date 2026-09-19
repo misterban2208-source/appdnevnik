@@ -188,8 +188,9 @@ function VoicePill({ note, index }: { note: VoiceNote; index: number }) {
     if (!ok) showToast(state === 'remote' ? t.voiceDownloadFailed : t.voiceError);
   };
 
-  const onSeek = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.stopPropagation();
+  // Seek on tap only: pointer-down must stay free for the horizontal swipe-to-delete gesture.
+  const onSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (dragged.current) return;
     if (!playable || !local.hasBlob) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -230,11 +231,12 @@ function VoicePill({ note, index }: { note: VoiceNote; index: number }) {
           axis.current = a;
         }}
         onDragStart={() => {
+          // Deferred by framer-motion; the axis is reset at the end of the gesture instead.
           dragged.current = true;
-          axis.current = null;
         }}
         onDragEnd={(_, info) => {
           if (axis.current === 'x' && info.offset.x < -90 && Math.abs(info.offset.x) > Math.abs(info.offset.y)) void deleteVoiceNote(note.id);
+          axis.current = null;
           setTimeout(() => {
             dragged.current = false;
           }, 250);
@@ -243,7 +245,7 @@ function VoicePill({ note, index }: { note: VoiceNote; index: number }) {
         <button className="vp-btn" onPointerDown={(e) => e.stopPropagation()} onClick={() => !dragged.current && void onPrimary()} aria-label={t.voiceNotes}>
           {primaryIcon}
         </button>
-        <div className="vp-wave" onPointerDown={onSeek} role="slider" aria-valuenow={Math.round(progress * 100)}>
+        <div className="vp-wave" onClick={onSeek} role="slider" aria-valuenow={Math.round(progress * 100)}>
           {bars ? (
             <>
               <div className="vp-bars">

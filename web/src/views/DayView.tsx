@@ -171,8 +171,8 @@ export default function DayView() {
         dragConstraints={{ left: 0, right: 0 }}
         dragElastic={0.12}
         onDragStart={() => {
+          // Deferred by framer-motion: never reset the locked axis here, onDirectionLock may already have fired.
           swiping.current = true;
-          lockedAxis.current = null;
         }}
         onDragEnd={(_, info) => {
           // Only a horizontal gesture changes the day; a vertical mouse drag never does.
@@ -180,6 +180,7 @@ export default function DayView() {
             if (info.offset.x < -SWIPE) go(1);
             else if (info.offset.x > SWIPE) go(-1);
           }
+          lockedAxis.current = null;
           setTimeout(() => {
             swiping.current = false;
           }, 250);
