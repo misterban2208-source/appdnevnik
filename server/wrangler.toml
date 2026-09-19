@@ -1,0 +1,30 @@
+name = "dnevnik"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Static frontend (built from ../web). API and bot routes are handled by the worker first.
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/bot/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dnevnik"
+database_id = "REPLACE_WITH_D1_ID"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+# Public URL of the deployed worker, e.g. https://dnevnik.<account>.workers.dev
+WEBAPP_URL = "https://dnevnik.example.workers.dev"
+# Set to a Telegram user id to allow opening the app in a plain browser without initData (local dev only).
+DEV_USER_ID = ""
+
+# Secrets (set with `wrangler secret put <NAME>`):
+#   BOT_TOKEN        - token from @BotFather
+#   WEBHOOK_SECRET   - random string, part of the webhook path
