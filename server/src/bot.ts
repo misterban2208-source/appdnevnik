@@ -1,7 +1,8 @@
 import { Bot, InlineKeyboard, type CommandContext, type Context } from 'grammy';
+import type { UserFromGetMe } from 'grammy/types';
 import type { Lang, NoteSection, TaskInstance, UserSettings } from '@dnevnik/shared';
 import { formatDuration, instancesForDate, minutesToHHMM, nowInTz, quickParse } from '@dnevnik/shared';
-import { and, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, or } from 'drizzle-orm';
 import type { Env } from './env.ts';
 import { ensureUser, getDb } from './sync.ts';
 import { importVoice } from './voice.ts';
@@ -189,17 +190,45 @@ export function dayMessage(items: TaskInstance[], lang: Lang, title: string): st
 }
 
 let cached: { token: string; bot: Bot } | null = null;
+let realInfo: UserFromGetMe | null = null;
 
-/** One Bot per isolate so grammY's init (getMe) does not run on every update. */
+/**
+ * Identity used until getMe answers. Without it grammY calls getMe before the first update of every
+ * isolate and a failure there (network blip, 429) turns the whole webhook into a 500 that Telegram
+ * keeps redelivering. Only command matching with an explicit @username depends on the real values.
+ */
+function placeholderInfo(token: string): UserFromGetMe {
+  return {
+    id: Number(token.split(':')[0]) || 0,
+    is_bot: true,
+    first_name: 'bot',
+    username: 'bot',
+    can_join_groups: false,
+    can_read_all_group_messages: false,
+    supports_inline_queries: false,
+  } as UserFromGetMe;
+}
+
+/** One Bot per isolate, created without a round trip to Telegram. */
 export function getBot(env: Env): Bot {
   if (cached && cached.token === env.BOT_TOKEN) return cached.bot;
-  const bot = createBot(env);
+  const bot = createBot(env, realInfo ?? placeholderInfo(env.BOT_TOKEN));
   cached = { token: env.BOT_TOKEN, bot };
+  if (!realInfo) {
+    // Learn the real identity in the background; failing must never fail an update.
+    void bot.api
+      .getMe()
+      .then((me) => {
+        realInfo = me;
+        bot.botInfo = me;
+      })
+      .catch((err) => console.warn('getMe failed, using the placeholder identity', err instanceof Error ? err.message : err));
+  }
   return bot;
 }
 
-export function createBot(env: Env): Bot {
-  const bot = new Bot(env.BOT_TOKEN);
+export function createBot(env: Env, botInfo?: UserFromGetMe): Bot {
+  const bot = new Bot(env.BOT_TOKEN, botInfo ? { botInfo } : undefined);
 
   // Never let a handler error bubble up: Telegram would redeliver the update and duplicate side effects.
   bot.catch((err) => {
@@ -277,11 +306,15 @@ export function createBot(env: Env): Bot {
     let categoryId: string | null = null;
     let missingCategory: string | null = null;
     if (p.categoryName) {
-      const cat = await u.db
-        .select({ id: categories.id })
+      // Matched in JS, not in SQL: SQLite's lower() is ASCII-only, so "#здоровье" would never
+      // match the category "Здоровье".
+      const rows = await u.db
+        .select({ id: categories.id, name: categories.name })
         .from(categories)
-        .where(and(eq(categories.userId, u.user.id), isNull(categories.deletedAt), eq(sql`lower(${categories.name})`, p.categoryName.toLowerCase())))
-        .get();
+        .where(and(eq(categories.userId, u.user.id), isNull(categories.deletedAt)))
+        .all();
+      const wanted = p.categoryName.toLowerCase();
+      const cat = rows.find((r) => r.name.toLowerCase() === wanted);
       if (cat) categoryId = cat.id;
       else missingCategory = p.categoryName;
     }

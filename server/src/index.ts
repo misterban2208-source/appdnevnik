@@ -109,7 +109,14 @@ app.post('/bot/:secret', async (c) => {
     /* no execution context (e.g. tests): handlers await instead */
   }
   setWaitUntil(waitUntil);
-  return webhookCallback(getBot(c.env), 'hono')(c);
+  try {
+    return await webhookCallback(getBot(c.env), 'hono')(c);
+  } catch (err) {
+    // grammY routes errors to bot.catch only for long polling. A webhook error would otherwise answer
+    // 500 and Telegram would redeliver the same update for hours, repeating every side effect with it.
+    console.error('webhook handler failed', err);
+    return c.text('ok');
+  }
 });
 
 app.notFound((c) => (c.req.path.startsWith('/api/') ? c.json({ error: 'not found' }, 404) : c.env.ASSETS.fetch(c.req.raw)));
