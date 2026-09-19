@@ -113,6 +113,9 @@ const dict = {
     reopen: 'Вернуть',
     total: 'Всего',
     of: 'из',
+    sessionExpired: 'Сессия устарела: закройте и откройте приложение заново',
+    durationDefaulted: 'время начала подобрано',
+    clampedNote: 'до полуночи',
   },
   en: {
     today: 'Today',
@@ -226,6 +229,9 @@ const dict = {
     reopen: 'Reopen',
     total: 'Total',
     of: 'of',
+    sessionExpired: 'Session expired: close and reopen the app',
+    durationDefaulted: 'start time chosen',
+    clampedNote: 'until midnight',
   },
 } as const;
 

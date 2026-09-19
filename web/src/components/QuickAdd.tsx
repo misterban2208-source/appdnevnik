@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { formatDuration, minutesToHHMM, quickParse } from '@dnevnik/shared';
+import { formatDuration, minutesToHHMM, nowMinutes, quickParse } from '@dnevnik/shared';
 import { useLiveCategories, useStore, useT } from '../store/index.ts';
 import { formatShortDate } from '../i18n/index.ts';
 import { haptic } from '../lib/telegram.ts';
@@ -25,11 +25,16 @@ export default function QuickAdd() {
     }
   }, [open]);
 
+  // Date words ("завтра", "пн") are absolute, so they resolve from the real today;
+  // a task with no date lands on the day currently being viewed.
   const baseDate = view === 'day' ? currentDate : today;
-  const parsed = useMemo(() => quickParse(text, baseDate), [text, baseDate]);
+  const parsed = useMemo(() => quickParse(text, today), [text, today]);
   const cat = parsed.categoryName ? categories.find((c) => c.name.toLowerCase() === parsed.categoryName!.toLowerCase()) ?? null : null;
   const date = parsed.date ?? baseDate;
-  const endMin = parsed.startMin !== null ? (parsed.endMin ?? Math.min(1440, parsed.startMin + (parsed.durationMin ?? 60))) : null;
+  // A duration without a start time gets the next free half hour (today) or 09:00, so it is not silently dropped.
+  const defaultedStart = parsed.startMin === null && parsed.durationMin !== null ? (date === today ? Math.min(1380, Math.ceil((nowMinutes() + 1) / 30) * 30) : 9 * 60) : null;
+  const startMin = parsed.startMin ?? defaultedStart;
+  const endMin = startMin !== null ? (parsed.endMin ?? Math.min(1440, startMin + (parsed.durationMin ?? 60))) : null;
 
   const submit = async () => {
     if (!parsed.title.trim()) return;
@@ -37,7 +42,7 @@ export default function QuickAdd() {
     await createTask({
       title: parsed.title.trim(),
       date,
-      startMin: parsed.startMin,
+      startMin,
       endMin,
       categoryId: cat?.id ?? null,
       priority: parsed.priority ?? 0,
@@ -85,13 +90,19 @@ export default function QuickAdd() {
             </form>
             <div className="chip-row scroll" style={{ marginTop: 12, minHeight: 34 }}>
               <span className="chip active">{date === today ? t.today : formatShortDate(date, lang)}</span>
-              {parsed.startMin !== null && (
+              {startMin !== null && (
                 <span className="chip active">
-                  {minutesToHHMM(parsed.startMin)}
+                  {minutesToHHMM(startMin)}
                   {endMin !== null && ` – ${minutesToHHMM(endMin)}`}
                 </span>
               )}
-              {parsed.startMin !== null && endMin !== null && <span className="chip">{formatDuration(endMin - parsed.startMin, lang)}</span>}
+              {startMin !== null && endMin !== null && (
+                <span className="chip">
+                  {formatDuration(endMin - startMin, lang)}
+                  {parsed.clamped && ` · ${t.clampedNote}`}
+                </span>
+              )}
+              {defaultedStart !== null && <span className="chip">{t.durationDefaulted}</span>}
               {cat && (
                 <span className="chip active" style={{ borderColor: cat.color, color: cat.color }}>
                   {cat.name}

@@ -30,6 +30,7 @@ export const tasks = sqliteTable('tasks', {
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
+  syncedAt: integer('synced_at').notNull().default(0),
   deletedAt: integer('deleted_at'),
 });
 
@@ -44,6 +45,7 @@ export const occurrences = sqliteTable('occurrences', {
   checklist: text('checklist'),
   deleted: integer('deleted').notNull().default(0),
   updatedAt: integer('updated_at').notNull(),
+  syncedAt: integer('synced_at').notNull().default(0),
 });
 
 export const categories = sqliteTable('categories', {
@@ -53,6 +55,7 @@ export const categories = sqliteTable('categories', {
   color: text('color').notNull(),
   sortOrder: integer('sort_order').notNull().default(0),
   updatedAt: integer('updated_at').notNull(),
+  syncedAt: integer('synced_at').notNull().default(0),
   deletedAt: integer('deleted_at'),
 });
 
@@ -63,6 +66,7 @@ export const dayNotes = sqliteTable('day_notes', {
   morning: text('morning').notNull().default(''),
   evening: text('evening').notNull().default(''),
   updatedAt: integer('updated_at').notNull(),
+  syncedAt: integer('synced_at').notNull().default(0),
 });
 
 export const sentNotifications = sqliteTable('sent_notifications', {
@@ -158,7 +162,7 @@ export function occurrenceToRow(o: Occurrence, userId: number): typeof occurrenc
 }
 
 export function categoryFromRow(r: typeof categories.$inferSelect): Category {
-  return { ...r };
+  return { id: r.id, userId: r.userId, name: r.name, color: r.color, sortOrder: r.sortOrder, updatedAt: r.updatedAt, deletedAt: r.deletedAt };
 }
 
 export function categoryToRow(c: Category, userId: number): typeof categories.$inferInsert {

@@ -27,7 +27,7 @@
   --radius-xs: 7px;
 
   /* Rounded body face + calligraphic display face for dates and titles */
-  --font-serif: 'Marck Script', 'Segoe Script', cursive;
+  --font-serif: 'Marck Script', 'Snell Roundhand', 'Segoe Script', cursive;
   --font-sans: 'Nunito', -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-display: var(--font-serif);
   --font-body: var(--font-sans);
@@ -52,12 +52,20 @@
 }
 
 html,
-body,
-#root {
+body {
   height: 100%;
   margin: 0;
   background: var(--bg);
   color: var(--text);
+}
+
+/* Telegram publishes the visible height while the sheet is collapsed; fall back to the full WebView. */
+#root {
+  height: var(--app-height, 100%);
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  transition: height 200ms var(--ease);
 }
 
 body {
@@ -348,6 +356,7 @@ h3 {
   overflow: hidden;
   color: var(--text);
   border: 1px solid transparent;
+  cursor: pointer;
   transition: box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease), opacity var(--dur) var(--ease);
   touch-action: pan-y;
 }
@@ -369,10 +378,11 @@ h3 {
   display: none;
 }
 .task-block.small {
-  padding: 3px 10px;
+  padding: 1px 10px;
 }
 .task-block.small .tb-title {
   font-size: 12px;
+  line-height: 1.1;
 }
 .task-block.done {
   opacity: 0.45;

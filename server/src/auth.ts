@@ -6,7 +6,7 @@ export interface TelegramUser {
   language_code?: string;
 }
 
-const MAX_AGE_SEC = 7 * 24 * 3600;
+const MAX_AGE_SEC = 48 * 3600;
 
 async function hmacSha256(key: ArrayBuffer | Uint8Array, data: string): Promise<ArrayBuffer> {
   const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);

@@ -3,11 +3,18 @@ import type { Category, DayNote, Occurrence, Task, TaskInstance, TaskStatus, Use
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, addDays, compareISO, occurrenceId, toISODate } from '@dnevnik/shared';
 import { db, getMeta, setMeta, type SettingsMeta } from '../lib/db.ts';
 import { syncOnce } from '../lib/sync.ts';
+import { ApiError } from '../lib/api.ts';
 import { haptic, setHapticsEnabled, tgUser } from '../lib/telegram.ts';
+import { uuid } from '../lib/util.ts';
 import { getDict, type Dict } from '../i18n/index.ts';
 
+/** Carry-over copies derive from the root task id so client and server converge. */
+export function carryRootId(id: string): string {
+  return id.split(':carry:')[0];
+}
+
 export type View = 'day' | 'week' | 'month' | 'list' | 'stats';
-export type SyncStatus = 'idle' | 'syncing' | 'ok' | 'pending' | 'error';
+export type SyncStatus = 'idle' | 'syncing' | 'ok' | 'pending' | 'error' | 'expired';
 
 export interface EditorState {
   taskId: string | null;
@@ -118,14 +125,11 @@ export const useStore = create<State>((set, get) => ({
     const user = await getMeta<{ firstName: string } | null>('user', null);
     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const browserLang = navigator.language?.startsWith('ru') ? 'ru' : 'en';
-    let settings: UserSettings = settingsMeta?.settings
+    // A fresh install must never push defaults over the user's server settings: pull first.
+    const settings: UserSettings = settingsMeta?.settings
       ? { ...DEFAULT_SETTINGS, ...settingsMeta.settings }
       : { ...DEFAULT_SETTINGS, lang: (tgUser()?.language_code?.startsWith('ru') ? 'ru' : browserLang) as UserSettings['lang'], tz: browserTz };
-    let dirty = settingsMeta?.dirty ?? true;
-    if (settings.tz !== browserTz && browserTz) {
-      settings = { ...settings, tz: browserTz };
-      dirty = true;
-    }
+    const dirty = settingsMeta?.dirty ?? false;
     const [tasks, occurrences, categories, notes] = await Promise.all([
       db.tasks.toArray(),
       db.occurrences.toArray(),
@@ -146,11 +150,12 @@ export const useStore = create<State>((set, get) => ({
       notes: Object.fromEntries(notes.map((n) => [n.id, n])),
     });
     await get().sync();
-    // Fresh install that could not reach the server: seed defaults locally (server seeds otherwise).
-    if (get().syncStatus === 'error' && !Object.keys(get().categories).length && !get().lastSync) {
+    // The device time zone drives reminders; push it as a settings change only after the pull.
+    if (browserTz && get().settings.tz !== browserTz) await get().updateSettings({ tz: browserTz });
+    // Fresh install that could not reach the server: seed defaults locally with the server's ids.
+    const uid = tgUser()?.id;
+    if (uid && get().syncStatus !== 'ok' && !Object.keys(get().categories).length && !get().lastSync) {
       const now = Date.now();
-      // Same deterministic ids as the server seed, so the two merge instead of duplicating.
-      const uid = tgUser()?.id ?? 0;
       for (const [i, c] of DEFAULT_CATEGORIES.entries()) {
         await get().saveCategory({ id: `${uid}:cat:${i}`, userId: uid, name: c.name[get().settings.lang], color: c.color, sortOrder: i, updatedAt: now + i, deletedAt: null });
       }
@@ -205,7 +210,7 @@ export const useStore = create<State>((set, get) => ({
     const s = get().settings;
     const startMin = partial.startMin ?? null;
     const task: Task = {
-      id: crypto.randomUUID(),
+      id: uuid(),
       userId: 0,
       title: partial.title,
       description: partial.description ?? '',
@@ -389,50 +394,75 @@ export const useStore = create<State>((set, get) => ({
 
   async runCarryover() {
     const today = toISODate(new Date());
-    set({ today });
+    if (get().today !== today) set({ today, currentDate: get().currentDate === get().today ? today : get().currentDate });
     const { settings, tasks } = get();
     if (!settings.carryover) return;
     const stale = Object.values(tasks).filter(
       (t) => !t.deletedAt && !t.repeat && compareISO(t.date, today) < 0 && (t.status === 'todo' || t.status === 'in_progress'),
     );
     for (const t of stale) {
-      const copyId = `${t.id}:carry:${today}`;
+      const copyId = `${carryRootId(t.id)}:carry:${today}`;
       if (!get().tasks[copyId]) {
         const now = Date.now();
         await get().saveTask({ ...t, id: copyId, date: today, carriedFrom: t.carriedFrom ?? t.date, status: 'todo', createdAt: now, updatedAt: now });
       }
-      await get().saveTask({ ...t, status: 'moved' });
+      // Bump by one millisecond only, so any real user edit still wins last-write-wins.
+      const moved = { ...t, status: 'moved' as const, updatedAt: t.updatedAt + 1 };
+      set((s) => ({ tasks: { ...s.tasks, [moved.id]: moved }, syncStatus: 'pending' }));
+      await persist('tasks', moved);
     }
+    if (stale.length) scheduleSync(get);
   },
 
   async sync() {
     if (get().syncStatus === 'syncing') return;
+    const prev = get().syncStatus;
     set({ syncStatus: 'syncing' });
+    const sentSettings = get().settings;
+    const sentDirty = get().settingsDirty;
     try {
-      const res = await syncOnce({ settings: get().settings, dirty: get().settingsDirty });
+      const res = await syncOnce({ settings: sentSettings, dirty: sentDirty });
       const [tasks, occurrences, categories, notes] = await Promise.all([
         db.tasks.toArray(),
         db.occurrences.toArray(),
         db.categories.toArray(),
         db.notes.toArray(),
       ]);
-      const pending = await db.outbox.count();
-      applyFont(res.settings.font);
-      setHapticsEnabled(res.settings.haptics);
-      set({
-        settings: res.settings,
-        settingsDirty: false,
-        userName: res.user.firstName || get().userName,
-        tasks: Object.fromEntries(tasks.map((t) => [t.id, t])),
-        occurrences: Object.fromEntries(occurrences.map((o) => [o.id, o])),
-        categories: Object.fromEntries(categories.map((c) => [c.id, c])),
-        notes: Object.fromEntries(notes.map((n) => [n.id, n])),
-        syncStatus: pending ? 'pending' : 'ok',
+      // A settings change made while the request was in flight must stay dirty and be pushed next time.
+      const settingsChangedMeanwhile = get().settings !== sentSettings;
+      const settings = settingsChangedMeanwhile ? get().settings : res.settings;
+      await setMeta('settings', { settings, dirty: settingsChangedMeanwhile } satisfies SettingsMeta);
+      applyFont(settings.font);
+      setHapticsEnabled(settings.haptics);
+      const pending = res.pending;
+      // Merge by updatedAt so a mutation made during the IndexedDB reads is never reverted.
+      const mergeInto = <T extends { id: string; updatedAt: number }>(cur: Record<string, T>, rows: T[]) => {
+        const out = { ...cur };
+        for (const r of rows) {
+          const c = out[r.id];
+          if (!c || r.updatedAt >= c.updatedAt) out[r.id] = r;
+        }
+        return out;
+      };
+      set((s) => ({
+        settings,
+        settingsDirty: settingsChangedMeanwhile,
+        userName: res.user.firstName || s.userName,
+        tasks: mergeInto(s.tasks, tasks),
+        occurrences: mergeInto(s.occurrences, occurrences),
+        categories: mergeInto(s.categories, categories),
+        notes: mergeInto(s.notes, notes),
+        syncStatus: pending || settingsChangedMeanwhile ? 'pending' : 'ok',
         lastSync: Date.now(),
-      });
-      if (pending) scheduleSync(get, 3000);
-    } catch {
-      set({ syncStatus: 'error' });
+      }));
+      if (pending || settingsChangedMeanwhile) scheduleSync(get, 1500);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        set({ syncStatus: 'expired' });
+        if (prev !== 'expired') get().showToast(getDict(get().settings.lang).sessionExpired);
+      } else {
+        set({ syncStatus: 'error' });
+      }
     }
   },
 }));

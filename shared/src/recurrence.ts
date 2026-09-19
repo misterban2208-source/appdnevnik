@@ -1,8 +1,10 @@
 import type { Occurrence, RepeatRule, Task, TaskInstance } from './types.ts';
-import { compareISO, parseISODate, weekdayOf } from './time.ts';
+import { compareISO, daysInMonth, parseISODate, weekdayOf } from './time.ts';
 
 export function occursOn(task: Pick<Task, 'date' | 'repeat'>, date: string): boolean {
   if (!task.repeat) return task.date === date;
+  // The start date always shows, so a rule that never matches cannot make the task unreachable.
+  if (task.date === date) return true;
   if (compareISO(date, task.date) < 0) return false;
   const r: RepeatRule = task.repeat;
   if (r.until && compareISO(date, r.until) > 0) return false;
@@ -18,8 +20,12 @@ export function occursOn(task: Pick<Task, 'date' | 'repeat'>, date: string): boo
     }
     case 'custom':
       return (r.days ?? []).includes(wd);
-    case 'monthly':
-      return parseISODate(date).getDate() === parseISODate(task.date).getDate();
+    case 'monthly': {
+      // Clamp to the last day of short months so a task on the 31st still occurs in February.
+      const d = parseISODate(date);
+      const target = Math.min(parseISODate(task.date).getDate(), daysInMonth(d.getFullYear(), d.getMonth()));
+      return d.getDate() === target;
+    }
     default:
       return false;
   }
@@ -51,10 +57,12 @@ export function instancesForDate(
     if (o?.deleted) continue;
     out.push({
       ...t,
-      status: o?.status ?? (t.status === 'done' || t.status === 'cancelled' ? 'todo' : t.status),
+      // The series template's own status is meaningless per day; only the override counts.
+      status: o?.status ?? 'todo',
       startMin: o?.startMin !== undefined && o?.startMin !== null ? o.startMin : t.startMin,
       endMin: o?.endMin !== undefined && o?.endMin !== null ? o.endMin : t.endMin,
-      checklist: o?.checklist ?? t.checklist,
+      // Checklist ticks are per day: without an override every item starts unticked.
+      checklist: o?.checklist ?? t.checklist.map((c) => ({ ...c, done: false })),
       instanceDate: date,
       isRecurringInstance: true,
       occurrenceId: o?.id ?? null,

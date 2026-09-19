@@ -1,20 +1,37 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { bodyLimit } from 'hono/body-limit';
 import { InputFile, webhookCallback } from 'grammy';
 import { asc, eq } from 'drizzle-orm';
-import type { SyncRequest } from '@dnevnik/shared';
 import type { Env } from './env.ts';
 import { validateInitData, type TelegramUser } from './auth.ts';
 import { applySync, ensureUser, getDb } from './sync.ts';
-import { createBot } from './bot.ts';
-import { runCron } from './cron.ts';
+import { getBot } from './bot.ts';
+import { claim, runCron } from './cron.ts';
 import { dayNotes, settingsFromRow, users } from './db/schema.ts';
+import { validateSyncRequest, ValidationError } from './validate.ts';
 
 type Variables = { user: typeof users.$inferSelect };
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+app.onError((err, c) => {
+  if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+  console.error('unhandled', err);
+  return c.json({ error: 'internal' }, 500);
+});
+
 app.use('/api/*', cors({ origin: (origin) => origin || '*', allowHeaders: ['Authorization', 'Content-Type'] }));
+app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
 
 app.get('/api/health', (c) => c.json({ ok: true, now: Date.now() }));
 
@@ -24,7 +41,8 @@ app.use('/api/*', async (c, next) => {
   let tg: TelegramUser | null = null;
   if (header.startsWith('tma ')) {
     tg = await validateInitData(header.slice(4), c.env.BOT_TOKEN);
-  } else if (c.env.DEV_USER_ID) {
+  } else if (c.env.DEV_USER_ID && LOCAL_HOSTS.has(new URL(c.req.url).hostname)) {
+    // Dev bypass only ever works against a local wrangler dev server.
     tg = { id: Number(c.env.DEV_USER_ID), first_name: 'Dev', language_code: 'ru' };
   }
   if (!tg) return c.json({ error: 'unauthorized' }, 401);
@@ -39,38 +57,44 @@ app.get('/api/me', (c) => {
 });
 
 app.post('/api/sync', async (c) => {
-  const body = (await c.req.json().catch(() => null)) as SyncRequest | null;
-  if (!body || typeof body !== 'object') return c.json({ error: 'bad request' }, 400);
-  const res = await applySync(getDb(c.env.DB), c.get('user'), body);
+  const body = await c.req.json().catch(() => null);
+  const req = validateSyncRequest(body, Date.now());
+  const res = await applySync(getDb(c.env.DB), c.get('user'), req);
   return c.json(res);
 });
 
-/** Sends all day notes to the user's chat as a Markdown document. */
+/** Sends all day notes to the user's chat as a Markdown document (at most once per minute). */
 app.post('/api/export/notes', async (c) => {
   const u = c.get('user');
+  const db = getDb(c.env.DB);
+  if (!(await claim(db, `export:${u.id}:${Math.floor(Date.now() / 60_000)}`))) return c.json({ error: 'rate_limited' }, 429);
+  if (!c.env.BOT_TOKEN) return c.json({ error: 'bot_not_configured' }, 503);
   const s = settingsFromRow(u.settings);
-  const rows = await getDb(c.env.DB).select().from(dayNotes).where(eq(dayNotes.userId, u.id)).orderBy(asc(dayNotes.date)).all();
+  const rows = await db.select().from(dayNotes).where(eq(dayNotes.userId, u.id)).orderBy(asc(dayNotes.date)).all();
   const ru = s.lang === 'ru';
   const lines: string[] = [`# ${ru ? 'Заметки' : 'Notes'}`, ''];
+  let count = 0;
   for (const n of rows) {
     if (!n.morning.trim() && !n.evening.trim()) continue;
+    count++;
     lines.push(`## ${n.date}`, '');
     if (n.morning.trim()) lines.push(`### ${ru ? 'Утро' : 'Morning'}`, '', n.morning.trim(), '');
     if (n.evening.trim()) lines.push(`### ${ru ? 'Вечер' : 'Evening'}`, '', n.evening.trim(), '');
   }
+  if (!count) return c.json({ ok: true, count: 0 });
   const md = lines.join('\n');
-  const bot = createBot(c.env);
-  await bot.api.sendDocument(u.id, new InputFile(new TextEncoder().encode(md), `notes-${new Date().toISOString().slice(0, 10)}.md`), {
+  await getBot(c.env).api.sendDocument(u.id, new InputFile(new TextEncoder().encode(md), `notes-${new Date().toISOString().slice(0, 10)}.md`), {
     caption: ru ? 'Экспорт заметок' : 'Notes export',
   });
-  return c.json({ ok: true, count: rows.length });
+  return c.json({ ok: true, count });
 });
 
-// ---- Telegram webhook ----
+// ---- Telegram webhook: secret both in the path and in Telegram's secret-token header ----
 app.post('/bot/:secret', async (c) => {
-  if (!c.env.WEBHOOK_SECRET || c.req.param('secret') !== c.env.WEBHOOK_SECRET) return c.text('forbidden', 403);
-  const bot = createBot(c.env);
-  return webhookCallback(bot, 'hono')(c);
+  if (!c.env.WEBHOOK_SECRET || !constantTimeEqual(c.req.param('secret'), c.env.WEBHOOK_SECRET)) return c.text('forbidden', 403);
+  const headerToken = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+  if (headerToken !== undefined && !constantTimeEqual(headerToken, c.env.WEBHOOK_SECRET)) return c.text('forbidden', 403);
+  return webhookCallback(getBot(c.env), 'hono')(c);
 });
 
 app.notFound((c) => (c.req.path.startsWith('/api/') ? c.json({ error: 'not found' }, 404) : c.env.ASSETS.fetch(c.req.raw)));

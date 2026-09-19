@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import type { TaskInstance } from '@dnevnik/shared';
 import { minutesToHHMM } from '@dnevnik/shared';
 import { haptic } from '../lib/telegram.ts';
+import { onSurface, tint } from '../lib/util.ts';
 import { EASE } from './Reveal.tsx';
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
   hourHeight: number;
   /** Converts minutes-from-midnight to pixel offset inside the blocks layer. */
   minToPx: (min: number) => number;
+  /** Visible (expanded) minute range; drags are clamped to it so the block never enters a collapsed strip. */
+  dragBounds: { min: number; max: number };
   leftPct: number;
   widthPct: number;
   selected: boolean;
@@ -23,12 +26,15 @@ interface Props {
 const SNAP = 5;
 const LONG_PRESS = 380;
 const MIN_DURATION = 10;
+/** Finger jitter below this distance does not cancel a long press. */
+const SLOP_PX = 8;
 
-export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx, leftPct, widthPct, selected, onSelect, onOpen, onCommit }: Props) {
+export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx, dragBounds, leftPct, widthPct, selected, onSelect, onOpen, onCommit }: Props) {
   const start = inst.startMin!;
   const end = inst.endMin!;
   const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressStart = useRef<{ x: number; y: number } | null>(null);
   const origin = useRef<{ y: number; start: number; end: number; mode: 'move' | 'resize' } | null>(null);
   const moved = useRef(false);
 
@@ -40,14 +46,17 @@ export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx,
   const clearPress = () => {
     if (pressTimer.current) clearTimeout(pressTimer.current);
     pressTimer.current = null;
+    pressStart.current = null;
   };
 
   const onPointerDown = (e: React.PointerEvent, mode: 'move' | 'resize') => {
     moved.current = false;
     if (!selected && mode === 'move') {
       // Long press selects the block; a normal tap opens it.
+      pressStart.current = { x: e.clientX, y: e.clientY };
       pressTimer.current = setTimeout(() => {
         pressTimer.current = null;
+        pressStart.current = null;
         haptic.medium();
         onSelect();
       }, LONG_PRESS);
@@ -60,26 +69,25 @@ export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx,
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (pressTimer.current) {
-      // Finger moved before long press: this is a scroll, cancel selection.
-      clearPress();
+    if (pressTimer.current && pressStart.current) {
+      // Real movement before the long press fires means the user is scrolling.
+      if (Math.hypot(e.clientX - pressStart.current.x, e.clientY - pressStart.current.y) > SLOP_PX) clearPress();
       return;
     }
     const o = origin.current;
     if (!o) return;
+    // Snap the delta only: a block at 09:07 keeps its minutes unless it is actually dragged.
     const dMin = Math.round(pxToMin(e.clientY - o.y) / SNAP) * SNAP;
-    if (Math.abs(dMin) >= SNAP) moved.current = true;
+    if (dMin !== 0) moved.current = true;
     if (o.mode === 'move') {
       const dur = o.end - o.start;
-      let s = Math.max(0, Math.min(1440 - dur, o.start + dMin));
-      s = Math.round(s / SNAP) * SNAP;
+      const s = Math.max(dragBounds.min, Math.min(dragBounds.max - dur, o.start + dMin));
       setDrag((prev) => {
         if (prev && prev.start !== s) haptic.selection();
         return { start: s, end: s + dur };
       });
     } else {
-      let en = Math.max(o.start + MIN_DURATION, Math.min(1440, o.end + dMin));
-      en = Math.round(en / SNAP) * SNAP;
+      const en = Math.min(dragBounds.max, Math.max(o.start + MIN_DURATION, o.end + dMin));
       setDrag((prev) => {
         if (prev && prev.end !== en) haptic.selection();
         return { start: o.start, end: en };
@@ -89,6 +97,7 @@ export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx,
 
   const onPointerUp = (e: React.PointerEvent) => {
     if (pressTimer.current) {
+      // Released before the long press: this was a tap.
       clearPress();
       if (!selected) onOpen();
       return;
@@ -97,7 +106,7 @@ export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx,
     origin.current = null;
     if (!o) return;
     e.stopPropagation();
-    if (drag && (drag.start !== start || drag.end !== end)) {
+    if (moved.current && drag && (drag.start !== start || drag.end !== end)) {
       haptic.rigid();
       onCommit(drag.start, drag.end);
     } else if (!moved.current && selected && o.mode === 'move') {
@@ -119,8 +128,8 @@ export default function TaskBlock({ inst, index = 0, color, hourHeight, minToPx,
         height,
         left: `${leftPct}%`,
         width: `calc(${widthPct}% - 3px)`,
-        background: `color-mix(in srgb, ${color} 26%, var(--bg-2))`,
-        borderColor: `color-mix(in srgb, ${color} 55%, transparent)`,
+        background: onSurface(color, 0.26),
+        borderColor: tint(color, 0.55),
         borderLeft: `3px solid ${color}`,
       }}
       onPointerDown={(e) => onPointerDown(e, 'move')}

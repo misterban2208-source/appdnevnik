@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import type { ChecklistItem, Priority, RepeatRule, RepeatType, Task, TaskStatus } from '@dnevnik/shared';
+import type { ChecklistItem, Priority, RepeatRule, RepeatType, Task, TaskInstance, TaskStatus } from '@dnevnik/shared';
 import { formatDuration, hhmmToMinutes, instancesForDate, minutesToHHMM } from '@dnevnik/shared';
 import { useLiveCategories, useStore, useT } from '../store/index.ts';
 import { IconCheck, IconPlus, IconX } from '../components/Icons.tsx';
 import { haptic, useBackButton } from '../lib/telegram.ts';
 import { modalMotion, reveal } from '../components/Reveal.tsx';
+import { tint, uuid } from '../lib/util.ts';
 
 const DURATIONS = [15, 30, 45, 60, 90, 120];
 const REMINDERS = [0, 5, 10, 15, 30, 60];
@@ -29,6 +30,9 @@ export default function TaskEditor() {
   const deleteTask = useStore((s) => s.deleteTask);
   const deleteOccurrence = useStore((s) => s.deleteOccurrence);
   const detachOccurrence = useStore((s) => s.detachOccurrence);
+  const setInstanceTime = useStore((s) => s.setInstanceTime);
+  const setInstanceStatus = useStore((s) => s.setInstanceStatus);
+  const setInstanceChecklist = useStore((s) => s.setInstanceChecklist);
   const lang = settings.lang;
 
   const base = editor.taskId ? tasks[editor.taskId] : null;
@@ -40,8 +44,12 @@ export default function TaskEditor() {
   const [scope, setScope] = useState<'occurrence' | 'series'>(isRecurring ? 'occurrence' : 'series');
 
   const initial: Task = useMemo(() => {
-    const src = inst ?? base;
-    if (src) return { ...src, date: isRecurring && scope === 'occurrence' ? editor.instanceDate : src.date };
+    // Series scope edits the template itself: never seed it from a day's occurrence overrides.
+    const src = isRecurring && scope === 'series' ? base : (inst ?? base);
+    if (src) {
+      const { instanceDate: _d, isRecurringInstance: _r, occurrenceId: _o, ...plain } = src as Task & Partial<TaskInstance>;
+      return { ...(plain as Task), date: isRecurring && scope === 'occurrence' ? editor.instanceDate : src.date };
+    }
     const p = editor.prefill ?? {};
     return {
       id: '',
@@ -102,11 +110,22 @@ export default function TaskEditor() {
   const save = async () => {
     if (!canSave) return;
     haptic.success();
-    const data = { ...form, title: form.title.trim() };
+    const data: Task = { ...form, title: form.title.trim() };
+    if (data.repeat?.until && data.repeat.until < data.date) data.repeat = { ...data.repeat, until: data.date };
     if (!base) {
       await createTask(data);
     } else if (isRecurring && scope === 'occurrence' && inst) {
-      await detachOccurrence(inst, { ...data, repeat: null });
+      // Only fields an occurrence override can hold changed -> keep the instance in the series.
+      const detachNeeded = (['title', 'description', 'categoryId', 'priority', 'date', 'reminders'] as const).some(
+        (k) => JSON.stringify(data[k]) !== JSON.stringify(initial[k]),
+      );
+      if (detachNeeded) {
+        await detachOccurrence(inst, { ...data, repeat: null });
+      } else {
+        if (data.startMin !== initial.startMin || data.endMin !== initial.endMin) await setInstanceTime(inst, data.startMin, data.endMin);
+        if (data.status !== initial.status) await setInstanceStatus(inst, data.status);
+        if (JSON.stringify(data.checklist) !== JSON.stringify(initial.checklist)) await setInstanceChecklist(inst, data.checklist);
+      }
     } else {
       await saveTask({ ...base, ...data, id: base.id, createdAt: base.createdAt });
     }
@@ -143,7 +162,7 @@ export default function TaskEditor() {
   const addItem = () => {
     const text = newItem.trim();
     if (!text) return;
-    const item: ChecklistItem = { id: crypto.randomUUID(), text, done: false };
+    const item: ChecklistItem = { id: uuid(), text, done: false };
     patch({ checklist: [...form.checklist, item] });
     setNewItem('');
   };
@@ -232,7 +251,7 @@ export default function TaskEditor() {
               <button
                 key={c.id}
                 className={`chip${form.categoryId === c.id ? ' active' : ''}`}
-                style={form.categoryId === c.id ? { borderColor: c.color, color: c.color, background: `color-mix(in srgb, ${c.color} 14%, transparent)` } : undefined}
+                style={form.categoryId === c.id ? { borderColor: c.color, color: c.color, background: tint(c.color, 0.14) } : undefined}
                 onClick={() => {
                   haptic.selection();
                   patch({ categoryId: c.id });
@@ -366,7 +385,7 @@ export default function TaskEditor() {
             {form.repeat && (
               <div style={{ marginTop: 10 }}>
                 <label>{t.repeatUntil}</label>
-                <input type="date" className="input" value={form.repeat.until ?? ''} onChange={(e) => patch({ repeat: { ...form.repeat!, until: e.target.value || null } })} />
+                <input type="date" className="input" min={form.date} value={form.repeat.until ?? ''} onChange={(e) => patch({ repeat: { ...form.repeat!, until: e.target.value && e.target.value >= form.date ? e.target.value : null } })} />
               </div>
             )}
           </motion.div>

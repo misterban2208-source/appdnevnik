@@ -33,7 +33,12 @@ export default function App() {
     const onOnline = () => void useStore.getState().sync();
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
-    const id = setInterval(() => void useStore.getState().sync(), 60_000);
+    const id = setInterval(() => {
+      const s = useStore.getState();
+      // Crossing midnight while the app stays open: carry over and move "today".
+      if (new Date().toDateString() !== new Date(s.today + 'T00:00').toDateString()) void s.runCarryover();
+      void s.sync();
+    }, 60_000);
     return () => {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onOnline);

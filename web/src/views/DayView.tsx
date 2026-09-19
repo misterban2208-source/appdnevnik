@@ -34,6 +34,10 @@ export default function DayView() {
   const [dir, setDir] = useState(0);
   const [expandBefore, setExpandBefore] = useState(false);
   const [expandAfter, setExpandAfter] = useState(false);
+  // Gesture bookkeeping: a click that follows a deselect or a swipe must not create a task.
+  const justDeselected = useRef(false);
+  const swiping = useRef(false);
+  const lockedAxis = useRef<'x' | 'y' | null>(null);
 
   const timed = items.filter((i) => i.startMin !== null && i.endMin !== null && i.status !== 'moved');
   const untimed = items.filter((i) => i.startMin === null && i.status !== 'moved');
@@ -71,12 +75,17 @@ export default function DayView() {
     return y;
   };
 
+  // Minute range the blocks may be dragged within (never into a collapsed strip).
+  const dragBounds = { min: showBefore ? 0 : vs * 60, max: showAfter ? 1440 : ve * 60 };
+
   // Auto-scroll to now (today) or to the first task.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const target = date === today ? minToPx(nowMin) : timed.length ? minToPx(timed[0].startMin!) : minToPx(vs * 60);
-    const headerOffset = el.querySelector<HTMLElement>('.timeline')?.offsetTop ?? 0;
+    const tl = el.querySelector<HTMLElement>('.timeline');
+    // Measure relative to the scroller itself; offsetTop would include the header above it.
+    const headerOffset = tl ? tl.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : 0;
     el.scrollTo({ top: Math.max(0, headerOffset + target - 180), behavior: 'auto' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date, segments.length]);
@@ -94,6 +103,12 @@ export default function DayView() {
   const sub = `${rel ? `${rel} · ` : ''}${doneCount} ${t.of} ${activeCount}`;
 
   const onTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('.task-block')) return;
+    if (swiping.current) return;
+    if (justDeselected.current) {
+      justDeselected.current = false;
+      return;
+    }
     if (selectedBlockId) {
       selectBlock(null);
       return;
@@ -148,16 +163,35 @@ export default function DayView() {
         initial={{ x: dir * 28, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={{ duration: 0.45, ease: EASE }}
-        drag="x"
+        drag={selectedBlockId ? false : 'x'}
         dragDirectionLock
+        onDirectionLock={(axis) => {
+          lockedAxis.current = axis;
+        }}
         dragConstraints={{ left: 0, right: 0 }}
         dragElastic={0.12}
+        onDragStart={() => {
+          swiping.current = true;
+          lockedAxis.current = null;
+        }}
         onDragEnd={(_, info) => {
-          if (info.offset.x < -SWIPE) go(1);
-          else if (info.offset.x > SWIPE) go(-1);
+          // Only a horizontal gesture changes the day; a vertical mouse drag never does.
+          if (lockedAxis.current === 'x' && Math.abs(info.offset.x) > Math.abs(info.offset.y)) {
+            if (info.offset.x < -SWIPE) go(1);
+            else if (info.offset.x > SWIPE) go(-1);
+          }
+          setTimeout(() => {
+            swiping.current = false;
+          }, 250);
         }}
         onPointerDown={(e) => {
-          if (selectedBlockId && !(e.target as HTMLElement).closest('.task-block')) selectBlock(null);
+          if (selectedBlockId && !(e.target as HTMLElement).closest('.task-block')) {
+            selectBlock(null);
+            justDeselected.current = true;
+            setTimeout(() => {
+              justDeselected.current = false;
+            }, 400);
+          }
         }}
       >
         {untimed.length > 0 && (
@@ -206,7 +240,7 @@ export default function DayView() {
           {(vs > 0 && showBefore && !hasBefore && vs !== 0) && (
             <button
               className="collapsed-hours"
-              style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 22, background: 'transparent', border: 0, fontSize: 11 }}
+              style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 22, background: 'transparent', border: 0, fontSize: 11, zIndex: 11 }}
               onClick={(e) => {
                 e.stopPropagation();
                 setExpandBefore(false);
@@ -228,6 +262,7 @@ export default function DayView() {
                   color={color}
                   hourHeight={HOUR_H}
                   minToPx={minToPx}
+                  dragBounds={dragBounds}
                   leftPct={(100 / col.cols) * col.col}
                   widthPct={100 / col.cols}
                   selected={selectedBlockId === inst.id}

@@ -22,8 +22,8 @@ crons = ["* * * * *"]
 [vars]
 # Public URL of the deployed worker, e.g. https://dnevnik.<account>.workers.dev
 WEBAPP_URL = "https://dnevnik.example.workers.dev"
-# Set to a Telegram user id to allow opening the app in a plain browser without initData (local dev only).
-DEV_USER_ID = ""
+# DEV_USER_ID lives only in .dev.vars (local dev): it bypasses Telegram auth and must never be deployed.
+
 
 # Secrets (set with `wrangler secret put <NAME>`):
 #   BOT_TOKEN        - token from @BotFather

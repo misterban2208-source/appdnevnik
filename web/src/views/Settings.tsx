@@ -6,6 +6,7 @@ import { api } from '../lib/api.ts';
 import { haptic, useBackButton } from '../lib/telegram.ts';
 import { IconPlus, IconTrash } from '../components/Icons.tsx';
 import Reveal, { modalMotion } from '../components/Reveal.tsx';
+import { uuid } from '../lib/util.ts';
 
 const PALETTE = ['#C9A961', '#3D5A99', '#5E8C61', '#8C5E7A', '#B5654A', '#6C7A89', '#A89F91', '#7A3E48', '#4F8A8B', '#9C8A5A'];
 const HOURS = Array.from({ length: 25 }, (_, i) => i);
@@ -43,7 +44,7 @@ export default function Settings() {
     const name = newCat.trim();
     if (!name) return;
     haptic.success();
-    await saveCategory({ id: crypto.randomUUID(), userId: 0, name, color: newColor, sortOrder: categories.length, updatedAt: Date.now(), deletedAt: null });
+    await saveCategory({ id: uuid(), userId: 0, name, color: newColor, sortOrder: categories.length, updatedAt: Date.now(), deletedAt: null });
     setNewCat('');
   };
 
@@ -61,7 +62,8 @@ export default function Settings() {
     }
   };
 
-  const syncLabel = syncStatus === 'ok' ? t.synced : syncStatus === 'error' ? t.syncError : syncStatus === 'syncing' ? '…' : t.syncPending;
+  const syncLabel =
+    syncStatus === 'ok' ? t.synced : syncStatus === 'error' ? t.syncError : syncStatus === 'expired' ? t.sessionExpired : syncStatus === 'syncing' ? '…' : t.syncPending;
 
   return (
     <motion.div className="modal" {...modalMotion}>

@@ -6,11 +6,16 @@ export interface SyncResult {
   settings: UserSettings;
   user: SyncResponse['user'];
   changed: number;
+  /** Outbox rows still waiting (the push is paged). */
+  pending: number;
 }
+
+/** The server accepts at most 500 rows per table per request; keep well under it. */
+const PAGE = 200;
 
 let inFlight: Promise<SyncResult> | null = null;
 
-/** Push local outbox, pull remote changes, merge with last-write-wins. Safe to call concurrently. */
+/** Push one page of the outbox, pull remote changes, merge with last-write-wins. Safe to call concurrently. */
 export function syncOnce(localSettings: SettingsMeta): Promise<SyncResult> {
   if (inFlight) return inFlight;
   inFlight = doSync(localSettings).finally(() => {
@@ -21,7 +26,14 @@ export function syncOnce(localSettings: SettingsMeta): Promise<SyncResult> {
 
 async function doSync(localSettings: SettingsMeta): Promise<SyncResult> {
   const since = await getMeta<number>('lastSync', 0);
-  const outbox = await db.outbox.toArray();
+  const outboxAll = await db.outbox.toArray();
+  const outbox: OutboxEntry[] = [];
+  const perTable: Record<string, number> = {};
+  for (const o of outboxAll) {
+    if ((perTable[o.table] ?? 0) >= PAGE) continue;
+    perTable[o.table] = (perTable[o.table] ?? 0) + 1;
+    outbox.push(o);
+  }
 
   const pick = async <T>(table: OutboxEntry['table'], store: { bulkGet: (ids: string[]) => Promise<(T | undefined)[]> }) => {
     const ids = outbox.filter((o) => o.table === table).map((o) => o.id);
@@ -70,8 +82,10 @@ async function doSync(localSettings: SettingsMeta): Promise<SyncResult> {
   });
 
   await setMeta('lastSync', res.now);
-  await setMeta('settings', { settings: res.settings, dirty: false } satisfies SettingsMeta);
+  // Settings meta is only overwritten when the caller's snapshot was pushed (or nothing local was dirty);
+  // the store decides whether a newer local edit must stay dirty.
   await setMeta('user', res.user);
 
-  return { settings: res.settings, user: res.user, changed };
+  const pending = await db.outbox.count();
+  return { settings: res.settings, user: res.user, changed, pending };
 }

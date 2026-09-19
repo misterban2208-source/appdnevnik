@@ -33,6 +33,7 @@ export default function TaskRow({ inst, showDate, onOpen, index = 0 }: Props) {
   const deleteOccurrence = useStore((s) => s.deleteOccurrence);
   const x = useMotionValue(0);
   const dragged = useRef(false);
+  const axis = useRef<'x' | 'y' | null>(null);
   const cat = inst.categoryId ? categories[inst.categoryId] : null;
 
   const remove = () => {
@@ -56,11 +57,16 @@ export default function TaskRow({ inst, showDate, onOpen, index = 0 }: Props) {
         dragConstraints={{ left: -120, right: 0 }}
         dragElastic={{ left: 0.2, right: 0 }}
         dragSnapToOrigin
+        onDirectionLock={(a) => {
+          axis.current = a;
+        }}
         onDragStart={() => {
           dragged.current = true;
+          axis.current = null;
         }}
         onDragEnd={(_, info) => {
-          if (info.offset.x < -90) remove();
+          // Delete only on a genuinely horizontal swipe (a vertical mouse drag also reports an x offset).
+          if (axis.current === 'x' && info.offset.x < -90 && Math.abs(info.offset.x) > Math.abs(info.offset.y)) remove();
           // A click event follows the drag; swallow it.
           setTimeout(() => {
             dragged.current = false;

@@ -36,6 +36,7 @@ await call('setWebhook', {
   url: `${WEBAPP_URL.replace(/\/$/, '')}/bot/${WEBHOOK_SECRET}`,
   allowed_updates: ['message', 'callback_query'],
   drop_pending_updates: true,
+  secret_token: WEBHOOK_SECRET,
 });
 await call('setChatMenuButton', {
   menu_button: { type: 'web_app', text: 'Ежедневник', web_app: { url: WEBAPP_URL } },

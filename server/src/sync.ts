@@ -1,7 +1,7 @@
-import { and, eq, gt, inArray } from 'drizzle-orm';
+import { and, eq, gt, inArray, like } from 'drizzle-orm';
 import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { Category, DayNote, Occurrence, SyncRequest, SyncResponse, Task, UserSettings } from '@dnevnik/shared';
-import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS } from '@dnevnik/shared';
+import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, hhmmToMinutes } from '@dnevnik/shared';
 import {
   categories,
   categoryFromRow,
@@ -22,8 +22,15 @@ import type { TelegramUser } from './auth.ts';
 
 export type DB = DrizzleD1Database;
 
+/** D1 allows at most 100 bound parameters per statement. */
+const ID_CHUNK = 50;
+
 export function getDb(d1: D1Database): DB {
   return drizzle(d1);
+}
+
+export function carryRootId(id: string): string {
+  return id.split(':carry:')[0];
 }
 
 export async function ensureUser(db: DB, tg: TelegramUser): Promise<typeof users.$inferSelect> {
@@ -59,6 +66,7 @@ export async function ensureUser(db: DB, tg: TelegramUser): Promise<typeof users
         color: c.color,
         sortOrder: i,
         updatedAt: now,
+        syncedAt: now,
         deletedAt: null,
       })),
     )
@@ -66,39 +74,51 @@ export async function ensureUser(db: DB, tg: TelegramUser): Promise<typeof users
   return row;
 }
 
+type AnyTable = typeof tasks | typeof occurrences | typeof categories | typeof dayNotes;
+
 async function upsertLWW<TRow extends { id: string; updatedAt: number }>(
   db: DB,
-  table: typeof tasks | typeof occurrences | typeof categories | typeof dayNotes,
+  table: AnyTable,
   userId: number,
   rows: TRow[],
+  syncedAt: number,
+  onConflictHook?: (incoming: TRow, existing: { id: string; updatedAt: number; status?: string | null }) => Promise<boolean | void>,
 ): Promise<void> {
   if (!rows.length) return;
+  const existingMap = new Map<string, { id: string; updatedAt: number; status?: string | null }>();
   const ids = rows.map((r) => r.id);
-  const existing = await db
-    .select({ id: table.id, updatedAt: table.updatedAt })
-    .from(table)
-    .where(and(eq(table.userId, userId), inArray(table.id, ids)))
-    .all();
-  const existingMap = new Map(existing.map((e) => [e.id, e.updatedAt]));
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    const found =
+      table === tasks
+        ? await db.select({ id: tasks.id, updatedAt: tasks.updatedAt, status: tasks.status }).from(tasks).where(and(eq(tasks.userId, userId), inArray(tasks.id, chunk))).all()
+        : await db.select({ id: table.id, updatedAt: table.updatedAt }).from(table).where(and(eq(table.userId, userId), inArray(table.id, chunk))).all();
+    for (const e of found) existingMap.set(e.id, e);
+  }
   for (const row of rows) {
     const prev = existingMap.get(row.id);
+    const withStamp = { ...row, syncedAt } as TRow & { syncedAt: number };
     if (prev === undefined) {
-      await db.insert(table).values(row as never).onConflictDoNothing();
-    } else if (row.updatedAt > prev) {
-      await db
-        .update(table)
-        .set(row as never)
-        .where(and(eq(table.id, row.id), eq(table.userId, userId)));
+      await db.insert(table).values(withStamp as never).onConflictDoNothing();
+    } else {
+      let apply = row.updatedAt > prev.updatedAt;
+      if (!apply && onConflictHook) apply = (await onConflictHook(row, prev)) === true;
+      if (apply) {
+        await db
+          .update(table)
+          .set(withStamp as never)
+          .where(and(eq(table.id, row.id), eq(table.userId, userId)));
+      }
     }
   }
 }
 
 export async function loadChangedSince(db: DB, userId: number, since: number) {
   const [t, o, c, n] = await Promise.all([
-    db.select().from(tasks).where(and(eq(tasks.userId, userId), gt(tasks.updatedAt, since))).all(),
-    db.select().from(occurrences).where(and(eq(occurrences.userId, userId), gt(occurrences.updatedAt, since))).all(),
-    db.select().from(categories).where(and(eq(categories.userId, userId), gt(categories.updatedAt, since))).all(),
-    db.select().from(dayNotes).where(and(eq(dayNotes.userId, userId), gt(dayNotes.updatedAt, since))).all(),
+    db.select().from(tasks).where(and(eq(tasks.userId, userId), gt(tasks.syncedAt, since))).all(),
+    db.select().from(occurrences).where(and(eq(occurrences.userId, userId), gt(occurrences.syncedAt, since))).all(),
+    db.select().from(categories).where(and(eq(categories.userId, userId), gt(categories.syncedAt, since))).all(),
+    db.select().from(dayNotes).where(and(eq(dayNotes.userId, userId), gt(dayNotes.syncedAt, since))).all(),
   ]);
   return {
     tasks: t.map(taskFromRow),
@@ -119,9 +139,10 @@ function sanitizeSettings(s: Partial<UserSettings> | undefined, prev: UserSettin
   if (typeof s.reportEnabled === 'boolean') out.reportEnabled = s.reportEnabled;
   if (Number.isInteger(s.visibleStart) && s.visibleStart! >= 0 && s.visibleStart! <= 23) out.visibleStart = s.visibleStart!;
   if (Number.isInteger(s.visibleEnd) && s.visibleEnd! >= 1 && s.visibleEnd! <= 24) out.visibleEnd = s.visibleEnd!;
-  if (typeof s.digestMorning === 'string' && /^\d{2}:\d{2}$/.test(s.digestMorning)) out.digestMorning = s.digestMorning;
-  if (typeof s.digestEvening === 'string' && /^\d{2}:\d{2}$/.test(s.digestEvening)) out.digestEvening = s.digestEvening;
-  if (Array.isArray(s.defaultReminders)) out.defaultReminders = s.defaultReminders.filter((n) => Number.isInteger(n) && n >= 0).slice(0, 5);
+  if (out.visibleEnd <= out.visibleStart) out.visibleEnd = Math.min(24, out.visibleStart + 1);
+  if (typeof s.digestMorning === 'string' && hhmmToMinutes(s.digestMorning) !== null) out.digestMorning = s.digestMorning;
+  if (typeof s.digestEvening === 'string' && hhmmToMinutes(s.digestEvening) !== null) out.digestEvening = s.digestEvening;
+  if (Array.isArray(s.defaultReminders)) out.defaultReminders = s.defaultReminders.filter((n) => Number.isInteger(n) && n >= 0 && n <= 1440).slice(0, 5);
   if (typeof s.tz === 'string' && s.tz.length < 64) {
     try {
       new Intl.DateTimeFormat('en-US', { timeZone: s.tz });
@@ -133,14 +154,32 @@ function sanitizeSettings(s: Partial<UserSettings> | undefined, prev: UserSettin
   return out;
 }
 
+/**
+ * A client's explicit completion of a task that the server auto-carried must win over the
+ * synthetic 'moved' status, and the carried copy must disappear.
+ */
+async function completionBeatsCarryOver(db: DB, userId: number, incoming: Task, existing: { status?: string | null }, syncedAt: number): Promise<boolean> {
+  if (existing.status !== 'moved') return false;
+  if (incoming.status !== 'done' && incoming.status !== 'cancelled') return false;
+  await db
+    .update(tasks)
+    .set({ deletedAt: syncedAt, updatedAt: syncedAt, syncedAt })
+    .where(and(eq(tasks.userId, userId), like(tasks.id, `${carryRootId(incoming.id)}:carry:%`), eq(tasks.status, 'todo')));
+  return true;
+}
+
 export async function applySync(db: DB, user: typeof users.$inferSelect, req: SyncRequest): Promise<SyncResponse> {
   const userId = user.id;
-  const since = Number.isFinite(req.since) ? Math.max(0, Number(req.since)) : 0;
+  // Cursor is taken before our own writes so nothing written concurrently is skipped next time.
+  const cursor = Date.now() - 1;
+  const syncedAt = Date.now();
 
-  await upsertLWW(db, tasks, userId, (req.tasks ?? []).map((t: Task) => taskToRow(t, userId)) as never);
-  await upsertLWW(db, occurrences, userId, (req.occurrences ?? []).map((o: Occurrence) => occurrenceToRow(o, userId)) as never);
-  await upsertLWW(db, categories, userId, (req.categories ?? []).map((c: Category) => categoryToRow(c, userId)) as never);
-  await upsertLWW(db, dayNotes, userId, (req.notes ?? []).map((n: DayNote) => noteToRow(n, userId)) as never);
+  await upsertLWW(db, tasks, userId, (req.tasks ?? []).map((t: Task) => taskToRow(t, userId)) as never, syncedAt, (inc, ex) =>
+    completionBeatsCarryOver(db, userId, taskFromRow(inc as never), ex, syncedAt),
+  );
+  await upsertLWW(db, occurrences, userId, (req.occurrences ?? []).map((o: Occurrence) => occurrenceToRow(o, userId)) as never, syncedAt);
+  await upsertLWW(db, categories, userId, (req.categories ?? []).map((c: Category) => categoryToRow(c, userId)) as never, syncedAt);
+  await upsertLWW(db, dayNotes, userId, (req.notes ?? []).map((n: DayNote) => noteToRow(n, userId)) as never, syncedAt);
 
   let settings = settingsFromRow(user.settings);
   if (req.settings) {
@@ -148,10 +187,10 @@ export async function applySync(db: DB, user: typeof users.$inferSelect, req: Sy
     await db.update(users).set({ settings: JSON.stringify(settings), updatedAt: Date.now() }).where(eq(users.id, userId));
   }
 
-  const changed = await loadChangedSince(db, userId, since);
+  const changed = await loadChangedSince(db, userId, req.since);
   return {
     ...changed,
-    now: Date.now(),
+    now: cursor,
     settings,
     user: { id: userId, firstName: user.firstName, username: user.username },
   };
