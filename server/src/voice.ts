@@ -20,6 +20,8 @@ const ALLOWED_MIME = new Set(['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpe
 const TG_DOWNLOAD_MAX = 20 * 1024 * 1024;
 /** D1 allows at most 100 bound parameters per statement. */
 const ID_CHUNK = 50;
+/** Mirror of validate.ts LIMITS.voiceMs: a longer audio file is stored with a clamped duration. */
+const VOICE_DURATION_MAX_MS = 3_600_000;
 
 export const voiceKey = (userId: number, id: string) => `voice/${userId}/${id}`;
 
@@ -305,7 +307,7 @@ export async function importVoice(env: Env, db: DB, userId: number, p: ImportVoi
     date: p.date,
     section: p.section,
     mime,
-    duration: Math.max(0, Math.round(p.durationSec * 1000)),
+    duration: Math.min(VOICE_DURATION_MAX_MS, Math.max(0, Math.round(p.durationSec * 1000))),
     size: buf.byteLength,
     peaks: '',
     source: 'bot',

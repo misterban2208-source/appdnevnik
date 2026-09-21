@@ -58,6 +58,11 @@ function num(v: unknown, field: string, min = -Infinity, max = Infinity): number
 }
 
 /** Out-of-range minutes are clamped, not rejected: a single odd value must never block a device's sync forever. */
+/** Rounds into [min, max]; unlike `num` it never throws for an out-of-range value. */
+function clamp(v: unknown, field: string, min: number, max: number): number {
+  return Math.round(Math.max(min, Math.min(max, num(v, field))));
+}
+
 function optNum(v: unknown, field: string, min: number, max: number): number | null {
   if (v === null || v === undefined) return null;
   const n = num(v, field);
@@ -195,8 +200,10 @@ export function validateVoiceNote(v: unknown, now: number): VoiceNote {
     date: isoDate(o.date, 'date'),
     section: o.section as NoteSection,
     mime,
-    duration: Math.round(num(o.duration ?? 0, 'duration', 0, LIMITS.voiceMs)),
-    size: Math.round(num(o.size ?? 0, 'size', 0)),
+    // Clamped, never rejected: one odd row (e.g. an hour-long audio imported from the bot) must not
+    // make every later /api/sync call fail and freeze the whole device.
+    duration: clamp(o.duration ?? 0, 'duration', 0, LIMITS.voiceMs),
+    size: clamp(o.size ?? 0, 'size', 0, Number.MAX_SAFE_INTEGER),
     peaks: str(o.peaks ?? '', LIMITS.peaks, 'peaks'),
     source: source as VoiceSource,
     createdAt,
