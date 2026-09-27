@@ -9,7 +9,9 @@ export const meta = {
   ],
 }
 
-const ROOT = 'C:\\Users\\Дмитрий\\Desktop\\Мини ап-дневник'
+// Subagents start in the session's working directory, which is the repository root, so no absolute
+// path is needed here (and workflow scripts have no filesystem or process access to derive one).
+const ROOT = 'the current working directory (repository root)'
 const CONTEXT = `Project root: ${ROOT}. Telegram Mini App day planner, Russian-first UI, premium dark design (graphite + gold).
 Stack already in place (read the files, do not modify anything):
 - server/: Cloudflare Worker (Hono 4, TypeScript), D1 (SQLite) via Drizzle, grammY bot with webhook at /bot/:secret, per-minute cron. Auth: 'Authorization: tma <initData>' validated in server/src/auth.ts; user id = Telegram id. Static frontend served from the same Worker via [assets] in server/wrangler.toml. Secrets: BOT_TOKEN, WEBHOOK_SECRET. Free tier only (Workers, D1; R2 free tier 10 GB is acceptable if justified).

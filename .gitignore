@@ -9,3 +9,10 @@ dist/
 !.env.example
 
 graphify-out/
+
+# Локальные базы данных и настройки Claude
+*.db
+*.sqlite
+*.sqlite3
+.claude/settings.local.json
+.claude/worktrees/
