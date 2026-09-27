@@ -37,7 +37,7 @@ Telegram Mini App ежедневник. Монорепо npm workspaces: `shared
 
 - Заголовок по-английски в повелительном наклонении, как в истории (`git log --format=%s -10`); тело «зачем», если из диффа не видно.
 - Файлы добавлять по именам. Никогда: `server/.dev.vars`, `.env*`, `*.db`, `graphify-out/`.
-- Remote пока нет: коммит остаётся локальным, в отчёте так и писать.
+- Remote: `origin` → github.com/misterban2208-source/appdnevnik (публичный). Пуш — только после ЧИСТО от `auditor`, через `/ship`; учётка GitHub хранится в Windows Credential Manager, запрашивать её не нужно.
 
 ## Среда
 
